@@ -1,0 +1,17 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  schemaVersion: v1.0.0
+  name: swift-brtc-sdk
+  description: Swift SDK for Bandwidth RTC
+  annotations:
+    github.com/project-slug: Bandwidth/swift-brtc-sdk
+  organization: BW
+  costCenter: 
+  platformType: 
+  buildPlatform: N/A
+spec:
+  type: Library
+  owner: github/band-programmable-voice
+  lifecycle: Prototype
+  
