@@ -65,4 +65,5 @@ Carthage/Build
 Carthage/Checkouts
 
 # SPM Index
-.build/index
+.build
+build
