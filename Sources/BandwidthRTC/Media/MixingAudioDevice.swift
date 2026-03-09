@@ -93,12 +93,14 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     func initialize(with delegate: any RTCAudioDeviceDelegate) -> Bool {
         self.delegate = delegate
+        // Set category/mode proactively — safe to do before CallKit activates the session.
+        // setActive(true) is intentionally deferred: either CallKit triggers enableAudioSession(),
+        // or startEngineIfNeeded() activates it on the first engine start (non-CallKit apps).
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
-            try session.setActive(true)
         } catch {
-            log.error("AVAudioSession config failed: \(error)")
+            log.error("AVAudioSession setCategory failed: \(error)")
         }
         setupSourceNode()                   // attach before engine starts → no mid-run reconfig
         setupEngineConfigurationObserver()  // safety net for real-device route changes
@@ -400,12 +402,38 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     private func startEngineIfNeeded() {
         guard !engine.isRunning else { return }
+        // Activate the session here for non-CallKit apps. When CallKit is in use,
+        // the session will already be active (activated by CXProviderDelegate) before
+        // enableAudioSession() calls this, so the setActive call is a no-op.
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            log.error("AVAudioSession setActive failed: \(error)")
+        }
         engine.prepare()
         do {
             try engine.start()
         } catch {
             log.error("AVAudioEngine start failed: \(error)")
         }
+    }
+
+    // MARK: - CallKit Integration
+
+    /// Call from `CXProviderDelegate.provider(_:didActivate:)` when using CallKit.
+    /// CallKit has activated the audio session; start the engine against it.
+    func enableAudioSession() {
+        startEngineIfNeeded()
+        if isPlaying { installPlayoutTap() }
+        log.debug("AudioSession enabled (CallKit)")
+    }
+
+    /// Call from `CXProviderDelegate.provider(_:didDeactivate:)` when using CallKit.
+    /// CallKit is deactivating the session; stop the engine so it releases the hardware.
+    func disableAudioSession() {
+        engine.mainMixerNode.removeTap(onBus: 0)
+        engine.stop()
+        log.debug("AudioSession disabled (CallKit)")
     }
 
     // MARK: - Private: File Playback Timer
