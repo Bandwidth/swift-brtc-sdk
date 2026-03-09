@@ -51,7 +51,7 @@ public final class BandwidthRTC: @unchecked Sendable {
     private(set) public var isConnected = false
     public private(set) var isPlayingFileAudio: Bool = false
 
-    // No pending SDP offers — both are answered during connect() init, matching JS SDK.
+    // No pending SDP offers — both are answered during connect() init.
 
     // MARK: - Init
 
@@ -79,13 +79,7 @@ public final class BandwidthRTC: @unchecked Sendable {
         // Clean up any stale state from a previous session that dropped without a clean disconnect
         if peerConnectionManager != nil || signaling != nil {
             Logger.shared.warn("connect() called with stale state — cleaning up previous session")
-            peerConnectionManager?.cleanup()
-            peerConnectionManager = nil
-            _ = mixingDevice?.terminateDevice()
-            mixingDevice = nil
-            let staleSig = signaling
-            signaling = nil
-            await staleSig?.disconnect()
+            await cleanupSession()
         }
 
         self.options = options
@@ -143,22 +137,22 @@ public final class BandwidthRTC: @unchecked Sendable {
         // Send setMediaPreferences to initiate the signaling flow.
         // The server responds with endpointId, deviceId, publishSdpOffer, and subscribeSdpOffer.
         let mediaResult = try await sig.setMediaPreferences()
-        Logger.shared.info("setMediaPreferences result: endpoint=\(mediaResult.endpointId ?? "nil"), hasPublishOffer=\(mediaResult.publishSdpOffer != nil), hasSubscribeOffer=\(mediaResult.subscribeSdpOffer != nil)")
+        Logger.shared.debug("setMediaPreferences result: endpoint=\(mediaResult.endpointId ?? "nil"), hasPublishOffer=\(mediaResult.publishSdpOffer != nil), hasSubscribeOffer=\(mediaResult.subscribeSdpOffer != nil)")
 
-        // Answer BOTH initial SDP offers immediately (no tracks) — matches JS SDK init() behavior.
+        // Answer BOTH initial SDP offers immediately (no tracks).
         // This establishes both peer connections, ICE, DTLS, and data channels right away.
         if let publishOffer = mediaResult.publishSdpOffer?.sdpOffer {
-            Logger.shared.info("Answering initial publish SDP offer (no tracks)...")
+            Logger.shared.debug("Answering initial publish SDP offer (no tracks)...")
             let publishAnswer = try await pcMgr.answerInitialOffer(sdpOffer: publishOffer, pcType: .publish)
             try await sig.answerSdp(sdpAnswer: publishAnswer, peerType: "publish")
-            Logger.shared.info("Initial publish SDP answer sent")
+            Logger.shared.debug("Initial publish SDP answer sent")
         }
 
         if let subscribeOffer = mediaResult.subscribeSdpOffer?.sdpOffer {
-            Logger.shared.info("Answering initial subscribe SDP offer...")
+            Logger.shared.debug("Answering initial subscribe SDP offer...")
             let subscribeAnswer = try await pcMgr.answerInitialOffer(sdpOffer: subscribeOffer, pcType: .subscribe)
             try await sig.answerSdp(sdpAnswer: subscribeAnswer, peerType: "subscribe")
-            Logger.shared.info("Initial subscribe SDP answer sent")
+            Logger.shared.debug("Initial subscribe SDP answer sent")
         }
 
         isConnected = true
@@ -175,25 +169,28 @@ public final class BandwidthRTC: @unchecked Sendable {
     public func disconnect() {
         stopFileAudio()
         isConnected = false
+        Task {
+            await self.cleanupSession()
+        }
+        Logger.shared.info("Disconnected from BRTC")
+    }
+
+    // MARK: - Private: Session Cleanup
+
+    private func cleanupSession() async {
         peerConnectionManager?.cleanup()
         peerConnectionManager = nil
         _ = mixingDevice?.terminateDevice()
         mixingDevice = nil
-
-        // Capture before nil so the Task doesn't call disconnect() on nil
         let sig = signaling
         signaling = nil
-        Task {
-            await sig?.disconnect()
-        }
-
-        Logger.shared.info("Disconnected from BRTC")
+        await sig?.disconnect()
     }
 
     // MARK: - Publishing
 
     /// Publish local audio.
-    /// Matches JS SDK: adds tracks, then creates a client-initiated offer sent via offerSdp.
+    /// Adds local tracks, then creates a client-initiated offer sent via offerSdp.
     public func publish(audio: Bool = true, alias: String? = nil) async throws -> RtcStream {
         guard isConnected, let pcManager = peerConnectionManager, let signalingClient = signaling else {
             throw BandwidthRTCError.notConnected
@@ -201,26 +198,25 @@ public final class BandwidthRTC: @unchecked Sendable {
 
         // 1. Wait for the publish PC's initial ICE handshake to complete.
         //    The server rejects offerSdp with "peer not ready" if the initial
-        //    handshake hasn't finished. In the JS SDK there's a natural delay
-        //    between init() and publish() (user interaction); we replicate that here.
-        Logger.shared.info("Waiting for publish PC ICE to connect...")
+        //    handshake hasn't finished.
+        Logger.shared.debug("Waiting for publish PC ICE to connect...")
         await pcManager.waitForPublishIceConnected()
-        Logger.shared.info("Publish PC ICE connected — proceeding with publish")
+        Logger.shared.debug("Publish PC ICE connected — proceeding with publish")
 
         // 2. Add local audio track to the publishing peer connection
         let mediaStream = pcManager.addLocalTracks(audio: audio)
 
         // 3. Create a client-initiated offer with the newly added tracks
         let localOffer = try await pcManager.createPublishOffer()
-        Logger.shared.info("Created publish offer with local tracks")
+        Logger.shared.debug("Created publish offer with local tracks")
 
         // 4. Send the offer to the server via offerSdp — server returns an SDP answer
         let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
-        Logger.shared.info("Server answered publish offer")
+        Logger.shared.debug("Server answered publish offer")
 
         // 5. Apply the server's answer as remote description, and our offer as local description
         try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
-        Logger.shared.info("Publish SDP exchange complete")
+        Logger.shared.debug("Publish SDP exchange complete")
 
         var mediaTypes: [MediaType] = []
         if audio { mediaTypes.append(.audio) }
@@ -230,11 +226,22 @@ public final class BandwidthRTC: @unchecked Sendable {
         return stream
     }
 
-    /// Unpublish previously published streams.
-    public func unpublish() async throws {
-        // For now, cleanup is handled via disconnect
-        // A full implementation would remove specific tracks and renegotiate
-        Logger.shared.info("Unpublish called")
+    /// Unpublish a previously published stream.
+    /// Removes the stream's tracks from the publish peer connection and renegotiates with the server.
+    public func unpublish(stream: RtcStream) async throws {
+        guard isConnected, let pcManager = peerConnectionManager, let signalingClient = signaling else {
+            throw BandwidthRTCError.notConnected
+        }
+
+        // Remove the stream's tracks from the publish PC
+        pcManager.removeLocalTracks(streamId: stream.streamId)
+
+        // Renegotiate: create a new offer without the removed tracks
+        let localOffer = try await pcManager.createPublishOffer()
+        let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
+        try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
+
+        Logger.shared.info("Unpublished stream \(stream.streamId)")
     }
 
     /// Swap the publish stream's audio source to the given file.
@@ -340,13 +347,13 @@ public final class BandwidthRTC: @unchecked Sendable {
                 metadata = (try? JSONDecoder().decode(ReadyMetadata.self, from: data)) ?? ReadyMetadata()
             }
 
-            Logger.shared.info("Ready event: endpoint=\(metadata.endpointId ?? "nil")")
+            Logger.shared.debug("Ready event: endpoint=\(metadata.endpointId ?? "nil")")
             self.onReady?(metadata)
         }
 
         // Handle established event
         await signaling.onEvent("established") { _ in
-            Logger.shared.info("Connection established")
+            Logger.shared.debug("Connection established")
         }
 
         // Handle disconnect
@@ -357,7 +364,7 @@ public final class BandwidthRTC: @unchecked Sendable {
     }
 
     private func handleSubscribeSdpOffer(_ data: Data) async {
-        Logger.shared.info(">>> Subscribe SDP offer received (\(data.count) bytes)")
+        Logger.shared.debug(">>> Subscribe SDP offer received (\(data.count) bytes)")
 
         guard let pcManager = peerConnectionManager, let sig = signaling else {
             Logger.shared.error("Subscribe SDP offer received but pcManager or signaling is nil")
@@ -375,7 +382,7 @@ public final class BandwidthRTC: @unchecked Sendable {
                 return
             }
 
-            Logger.shared.info("Subscribe SDP offer: revision=\(notification.sdpRevision.map(String.init) ?? "nil"), peerType=\(notification.peerType ?? "nil"), endpointId=\(notification.endpointId ?? "nil"), metadata keys=\(notification.streamSourceMetadata?.keys.joined(separator: ",") ?? "none")")
+            Logger.shared.debug("Subscribe SDP offer: revision=\(notification.sdpRevision.map(String.init) ?? "nil"), peerType=\(notification.peerType ?? "nil"), endpointId=\(notification.endpointId ?? "nil"), metadata keys=\(notification.streamSourceMetadata?.keys.joined(separator: ",") ?? "none")")
 
             let answerSdp = try await pcManager.handleSubscribeSdpOffer(
                 sdpOffer: notification.sdpOffer,
@@ -385,7 +392,7 @@ public final class BandwidthRTC: @unchecked Sendable {
 
             try await sig.answerSdp(sdpAnswer: answerSdp, peerType: "subscribe")
 
-            Logger.shared.info("<<< Subscribe SDP answer sent (revision=\(notification.sdpRevision.map(String.init) ?? "auto"))")
+            Logger.shared.debug("<<< Subscribe SDP answer sent (revision=\(notification.sdpRevision.map(String.init) ?? "auto"))")
         } catch {
             Logger.shared.error("Failed to handle subscribe SDP offer: \(error)")
         }

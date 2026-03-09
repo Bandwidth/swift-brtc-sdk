@@ -1,5 +1,5 @@
 import XCTest
-@testable import BandwidthBRTC
+@testable import BandwidthRTC
 
 final class JsonRpcTests: XCTestCase {
 

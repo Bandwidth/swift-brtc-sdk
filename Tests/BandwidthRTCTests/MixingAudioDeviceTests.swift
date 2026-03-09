@@ -1,5 +1,5 @@
 import XCTest
-@testable import BandwidthBRTC
+@testable import BandwidthRTC
 
 /// Unit tests for MixingAudioDevice.
 /// These tests focus on state flags, ring buffer overflow, format properties, and file loading.

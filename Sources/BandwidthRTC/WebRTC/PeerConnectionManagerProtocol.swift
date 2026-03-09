@@ -15,6 +15,7 @@ protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
     func waitForPublishIceConnected() async
     func answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType) async throws -> String
     func addLocalTracks(audio: Bool) -> RTCMediaStream
+    func removeLocalTracks(streamId: String)
     func createPublishOffer() async throws -> String
     func applyPublishAnswer(localOffer: String, remoteAnswer: String) async throws
     func handleSubscribeSdpOffer(

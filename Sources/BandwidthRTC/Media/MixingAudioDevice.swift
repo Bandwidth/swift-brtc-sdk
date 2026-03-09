@@ -131,14 +131,14 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         isPlaying = true
         startEngineIfNeeded()
         installPlayoutTap()
-        log.info("Playout started")
+        log.debug("Playout started")
         return true
     }
 
     func stopPlayout() -> Bool {
         isPlaying = false
         removePlayoutTap()
-        log.info("Playout stopped")
+        log.debug("Playout stopped")
         return true
     }
 
@@ -154,13 +154,13 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
     func startRecording() -> Bool {
         isRecording = true
         startEngineIfNeeded()
-        log.info("Recording started")
+        log.debug("Recording started")
         return true
     }
 
     func stopRecording() -> Bool {
         isRecording = false
-        log.info("Recording stopped")
+        log.debug("Recording stopped")
         return true
     }
 
@@ -219,14 +219,14 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
             self.filePCMBuffer = converted
             self.fileReadPos = 0
         }
-        log.info("File loaded: \(url.lastPathComponent), \(converted.frameLength) frames at 48kHz")
+        log.debug("File loaded: \(url.lastPathComponent), \(converted.frameLength) frames at 48kHz")
     }
 
     func startFilePlayback() {
         audioQueue.async {
             self.isPlayingFile = true
             self.startFilePlaybackTimer()
-            self.log.info("File playback started")
+            self.log.debug("File playback started")
         }
     }
 
@@ -235,7 +235,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
             self.isPlayingFile = false
             self.fileReadPos = 0
             self.stopFilePlaybackTimer()
-            self.log.info("File playback stopped")
+            self.log.debug("File playback stopped")
         }
     }
 

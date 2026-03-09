@@ -1,6 +1,6 @@
 import XCTest
 import WebRTC
-@testable import BandwidthBRTC
+@testable import BandwidthRTC
 
 /// Tests for PeerConnectionManager.
 /// Focuses on state-logic paths that don't require real SDP negotiation.

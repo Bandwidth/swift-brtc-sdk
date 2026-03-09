@@ -1,5 +1,5 @@
 import Foundation
-@testable import BandwidthBRTC
+@testable import BandwidthRTC
 
 /// Mock WebSocket for testing SignalingClient without real network connections.
 /// Uses @unchecked Sendable + NSLock for thread safety since WebSocketProtocol

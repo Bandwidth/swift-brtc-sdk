@@ -87,10 +87,10 @@ actor SignalingClient {
         // Start ping keepalive
         startPingLoop()
 
-        log.info("WebSocket connection initiated")
+        log.debug("WebSocket connection initiated")
     }
 
-    func disconnect() {
+    func disconnect() async {
         log.info("Disconnecting")
 
         // Send leave notification (fire-and-forget)
@@ -117,11 +117,11 @@ actor SignalingClient {
 
     // MARK: - Event Handlers
 
-    func onEvent(_ method: String, handler: @escaping @Sendable (Data) -> Void) {
+    func onEvent(_ method: String, handler: @escaping @Sendable (Data) -> Void) async {
         eventHandlers[method] = handler
     }
 
-    func removeEventHandler(_ method: String) {
+    func removeEventHandler(_ method: String) async {
         eventHandlers.removeValue(forKey: method)
     }
 
@@ -249,7 +249,7 @@ actor SignalingClient {
         }
 
         let rawString = String(data: data, encoding: .utf8) ?? "?"
-        log.info("WS received: \(String(rawString.prefix(200)))")
+        log.debug("WS received: \(String(rawString.prefix(200)))")
 
         guard let incoming = try? JSONDecoder().decode(JsonRpcIncoming.self, from: data) else {
             log.warn("Failed to decode incoming JSON-RPC message")
@@ -286,7 +286,7 @@ actor SignalingClient {
 
     private func handleNotification(_ notification: JsonRpcIncoming, rawData: Data) {
         guard let method = notification.method else { return }
-        log.info("Server notification: \(method)")
+        log.debug("Server notification: \(method)")
 
         // Extract the params portion and re-encode for the handler
         if let handler = eventHandlers[method] {
@@ -298,7 +298,7 @@ actor SignalingClient {
                     handler(Data())
                 }
             } else {
-                log.info("Notification \(method) has no params")
+                log.debug("Notification \(method) has no params")
                 handler(Data())
             }
         } else {

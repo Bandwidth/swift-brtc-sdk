@@ -1,5 +1,5 @@
 import Foundation
-@testable import BandwidthBRTC
+@testable import BandwidthRTC
 
 /// Mock SignalingClient for testing BandwidthRTC without real network connections.
 /// Implemented as a class (not actor) so tests can configure it without `await`.

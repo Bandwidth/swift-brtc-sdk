@@ -2,22 +2,22 @@
 import PackageDescription
 
 let package = Package(
-    name: "BandwidthBRTC",
+    name: "BandwidthRTC",
     platforms: [.iOS(.v17)],
     products: [
-        .library(name: "BandwidthBRTC", targets: ["BandwidthBRTC"]),
+        .library(name: "BandwidthRTC", targets: ["BandwidthRTC"]),
     ],
     dependencies: [
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "114.0.0"),
     ],
     targets: [
         .target(
-            name: "BandwidthBRTC",
+            name: "BandwidthRTC",
             dependencies: [.product(name: "WebRTC", package: "WebRTC")]
         ),
         .testTarget(
-            name: "BandwidthBRTCTests",
-            dependencies: ["BandwidthBRTC"]
+            name: "BandwidthRTCTests",
+            dependencies: ["BandwidthRTC"]
         ),
     ]
 )

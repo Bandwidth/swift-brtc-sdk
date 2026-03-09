@@ -1,83 +1,36 @@
-# Bandwidth WebRTC Swift
+# Bandwidth RTC Swift
 
-Bandwidth WebRTC Swift is an open-source implementation of [Bandwidth WebRTC](https://dev.bandwidth.com/webrtc/about.html) suitable for iOS devices.
-
-In order to take advantage of this package a Bandwidth account with WebRTC Audio and/or Video must be enabled.
+Bandwidth RTC Swift is an iOS SDK for building real-time audio communication apps on the Bandwidth platform. Please refer to the (BandwidthRTC documentation)[https://dev.bandwidth.com/docs/voice/programmable-voice/bxml/connect] for learning more about the product.
 
 ## Quick Start
 
 ```swift
+import BandwidthRTC
 
-import WebRTC
-import BandwidthWebRTC
+class CallService {
+    let brtc = BandwidthRTC()
 
-class WebRTCService {
-    let bandwidth = RTCBandwidth()
-    
-    var localVideoTrack: RTCVideoTrack?
-    var localCameraVideoCapturer: RTCCameraVideoCapturer?
-
-    var remoteVideoTrack: RTCVideoTrack?
-
-    init() {
-        bandwidth.delegate = self
-
-        getToken { token in
-            try? self.bandwidth.connect(using: token) {
-                self.bandwidth.publish(alias: "Bolg") { stream in
-                    self.localVideoTrack = stream.mediaStream.track as? RTCVideoTrack
-                    // localRenderer should be a UIView of type RTCVideoRenderer. This is the view which displays the local video.
-                    self.localVideoTrack?.add(self.localRenderer)
-
-                    self.localCameraVideoCapturer = RTCCameraVideoCapturer()
-                    self.localCameraVideoCapturer?.delegate = self.localVideoTrack?.source
-
-                    // Grab the front facing camera. TODO: Add support for additional cameras.
-                    guard let device = RTCCameraVideoCapturer.captureDevices().first(where: { $0.position == .front }) else {
-                        return
-                    }
-                    
-                    // Grab the highest resolution available.
-                    guard let format = RTCCameraVideoCapturer.supportedFormats(for: device)
-                        .sorted(by: { CMVideoFormatDescriptionGetDimensions($0.formatDescription).width < CMVideoFormatDescriptionGetDimensions($1.formatDescription).width })
-                        .last else {
-                        return
-                    }
-                    
-                    // Grab the highest fps available.
-                    guard let fps = format.videoSupportedFrameRateRanges
-                        .compactMap({ $0.maxFrameRate })
-                        .sorted()
-                        .last else {
-                        return
-                    }
-                    
-                    // Start capturing local video with the given parameters.
-                    self.localCameraVideoCapturer?.startCapture(with: device, format: format, fps: Int(fps))
-                }
-            }
+    func startCall(token: String) async throws {
+        brtc.onStreamAvailable = { stream in
+            // Handle incoming remote audio stream
+            print("Remote stream available: \(stream.streamId)")
         }
-    }
 
-    func getToken(completion: @escaping (String) -> Void) {
-        // Return a Bandwidth WebRTC participant token from your application server. https://dev.bandwidth.com/webrtc/methods/participants/createParticipant.html
-    }
-}
-
-extension WebRTCService: RTCBandwidthDelegate {
-    func bandwidth(_ bandwidth: RTCBandwidth, streamAvailable stream: RTCStream) {
-        if let remoteVideoTrack = stream.mediaStream.track as? RTCVideoTrack {
-            self.remoteVideoTrack = remoteVideoTrack
-            
-            DispatchQueue.main.async {
-                // remoteRenderer should be a UIView of type RTCVideoRenderer. This is the view which displays the remote video.
-                self.remoteVideoTrack?.add(self.remoteRenderer)
-            }
+        brtc.onStreamUnavailable = { streamId in
+            print("Remote stream removed: \(streamId)")
         }
+
+        brtc.onReady = { metadata in
+            print("Connected — endpointId: \(metadata.endpointId ?? "unknown")")
+        }
+
+        try await brtc.connect(authParams: RtcAuthParams(endpointToken: token))
+        let localStream = try await brtc.publish(audio: true)
+        print("Publishing local audio: \(localStream.streamId)")
     }
 
-    func bandwidth(_ bandwidth: RTCBandwidth, streamUnavailable stream: RTCStream) {
-        
+    func endCall() {
+        brtc.disconnect()
     }
 }
 ```

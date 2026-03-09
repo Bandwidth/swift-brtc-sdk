@@ -1,6 +1,6 @@
 import Foundation
 import WebRTC
-@testable import BandwidthBRTC
+@testable import BandwidthRTC
 
 /// Mock PeerConnectionManager for testing BandwidthRTC without real WebRTC.
 final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManagerProtocol {
@@ -62,6 +62,11 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     func addLocalTracks(audio: Bool) -> RTCMediaStream {
         addLocalTracksAudioArg = audio
         return Self.sharedFactory.mediaStream(withStreamId: "mock-\(UUID().uuidString)")
+    }
+
+    var removeLocalTracksStreamIdArg: String? = nil
+    func removeLocalTracks(streamId: String) {
+        removeLocalTracksStreamIdArg = streamId
     }
 
     func createPublishOffer() async throws -> String {

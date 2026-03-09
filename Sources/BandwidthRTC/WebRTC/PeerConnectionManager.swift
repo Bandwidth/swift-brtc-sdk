@@ -41,8 +41,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     var onPublishingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)?
     var onSubscribingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)?
 
-    // ICE connected continuations — used to await publish PC readiness before offerSdp
-    private var publishIceConnectedContinuation: CheckedContinuation<Void, Never>?
+    // ICE connected flag — used to await publish PC readiness before offerSdp
     private(set) var publishIceConnected = false
 
     // MARK: - Init
@@ -93,13 +92,12 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             delegate: self
         )!
 
-        // Don't pre-create data channels. The JS BRTC SDK never calls
-        // createDataChannel — all data channels (__heartbeat__, __diagnostics__)
+        // Don't pre-create data channels — all data channels (__heartbeat__, __diagnostics__)
         // are created by the server in-band via the SDP and received via
         // the ondatachannel / didOpen delegate callback.
 
         self.publishingPC = pc
-        log.info("Publishing peer connection created")
+        log.debug("Publishing peer connection created")
         return pc
     }
 
@@ -123,7 +121,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         // setRemoteDescription to hang in WebRTC M114.
 
         self.subscribingPC = pc
-        log.info("Subscribing peer connection created (no pre-created data channels)")
+        log.debug("Subscribing peer connection created (no pre-created data channels)")
         return pc
     }
 
@@ -134,13 +132,10 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             log.debug("Publish ICE already connected, skipping wait")
             return
         }
-        await withCheckedContinuation { continuation in
-            // Double-check in case it connected while we were setting up
-            if publishIceConnected {
-                continuation.resume()
-            } else {
-                publishIceConnectedContinuation = continuation
-            }
+        // Poll until ICE is connected/completed — avoids a single stored continuation
+        // being overwritten if multiple callers wait concurrently.
+        while !publishIceConnected {
+            try? await Task.sleep(nanoseconds: 50_000_000) // 50 ms
         }
     }
 
@@ -148,7 +143,6 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
 
     /// Answer an initial SDP offer from the server (no tracks attached).
     /// Called during connect/init for both publish and subscribe PCs.
-    /// Matches JS SDK setupPeerConnection() behavior.
     func answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType) async throws -> String {
         let pc: RTCPeerConnection?
         switch pcType {
@@ -210,13 +204,11 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         let stream = factory.mediaStream(withStreamId: streamId)
 
         if audio {
-            // Pass nil for audio source constraints — use platform defaults
-            // (matches old Bandwidth WebRTC iOS SDK and JS BRTC SDK behavior)
             let audioSource = factory.audioSource(with: nil)
             let audioTrack = factory.audioTrack(with: audioSource, trackId: "audio-\(streamId)")
             stream.addAudioTrack(audioTrack)
             pc.add(audioTrack, streamIds: [streamId])
-            log.info("Added audio track to publishing PC")
+            log.debug("Added audio track to publishing PC")
         } else {
             log.debug("addLocalTracks called with audio=false")
         }
@@ -226,13 +218,13 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     }
 
     /// Create a client-initiated SDP offer for the publish PC (after tracks are added).
-    /// Matches JS SDK offerPublishSdp() — uses createOffer, NOT createAnswer.
+    /// Uses createOffer (not createAnswer) because this is a client-originated renegotiation.
     func createPublishOffer() async throws -> String {
         guard let pc = publishingPC else {
             throw BandwidthRTCError.publishFailed("Publishing peer connection not available")
         }
 
-        // Matches JS SDK: offerToReceiveAudio/Video = false (send-only publish PC)
+        // send-only publish PC
         let offerConstraints = RTCMediaConstraints(
             mandatoryConstraints: [
                 kRTCMediaConstraintsOfferToReceiveAudio: kRTCMediaConstraintsValueFalse,
@@ -255,12 +247,12 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             }
         }
 
-        log.info("Publish SDP offer created (client-initiated)")
+        log.debug("Publish SDP offer created (client-initiated)")
         return offerSdp
     }
 
     /// Apply the server's SDP answer to the publish PC after offerSdp returns.
-    /// Matches JS SDK: setLocalDescription(offer), then setRemoteDescription(answer).
+    /// Sets local description (our offer) then remote description (server answer).
     func applyPublishAnswer(localOffer: String, remoteAnswer: String) async throws {
         guard let pc = publishingPC else {
             throw BandwidthRTCError.publishFailed("Publishing peer connection not available")
@@ -291,13 +283,13 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             }
         }
 
-        log.info("Publish SDP answer applied (local offer + remote answer)")
+        log.debug("Publish SDP answer applied (local offer + remote answer)")
     }
 
     // MARK: - Subscribing
 
     /// Handle an incoming SDP offer for the subscribing peer connection.
-    /// Matches the JS BRTC SDK: no SDP munging, raw SDP passed directly.
+    /// No SDP munging — raw SDP is passed directly.
     /// Returns the SDP answer string to send back to the server.
     func handleSubscribeSdpOffer(
         sdpOffer: String,
@@ -313,39 +305,39 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         }
 
         if subscribeSdpRevision == 0 {
-            log.info("Accepting first subscribe SDP offer (revision 0→\(effectiveRevision))")
+            log.debug("Accepting first subscribe SDP offer (revision 0→\(effectiveRevision))")
         }
 
         guard let pc = subscribingPC else {
             throw BandwidthRTCError.sdpNegotiationFailed("Subscribing peer connection not available")
         }
 
-        log.info("[subscribe] Handling offer (revision=\(effectiveRevision), signalingState=\(pc.signalingState.rawValue))")
+        log.debug("[subscribe] Handling offer (revision=\(effectiveRevision), signalingState=\(pc.signalingState.rawValue))")
 
         // Update metadata
         if let metadata {
             subscribedStreamMetadata.merge(metadata) { _, new in new }
         }
 
-        // No SDP munging — pass raw SDP directly (matches JS BRTC SDK behavior)
+        // No SDP munging — pass raw SDP directly
         let offer = RTCSessionDescription(type: .offer, sdp: sdpOffer)
 
         // Step 1: setRemoteDescription
-        log.info("[subscribe] Step 1: setRemoteDescription...")
+        log.debug("[subscribe] Step 1: setRemoteDescription...")
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             pc.setRemoteDescription(offer) { error in
                 if let error {
                     self.log.error("[subscribe] setRemoteDescription FAILED: \(error.localizedDescription)")
                     continuation.resume(throwing: BandwidthRTCError.sdpNegotiationFailed(error.localizedDescription))
                 } else {
-                    self.log.info("[subscribe] Step 1: setRemoteDescription SUCCESS")
+                    self.log.debug("[subscribe] Step 1: setRemoteDescription SUCCESS")
                     continuation.resume()
                 }
             }
         }
 
         // Step 2: createAnswer
-        log.info("[subscribe] Step 2: createAnswer...")
+        log.debug("[subscribe] Step 2: createAnswer...")
         let answerConstraints = RTCMediaConstraints(
             mandatoryConstraints: nil,
             optionalConstraints: nil
@@ -365,14 +357,14 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
                     return
                 }
 
-                // Step 3: setLocalDescription — no SDP munging (matches JS SDK)
-                self.log.info("[subscribe] Step 3: setLocalDescription...")
+                // Step 3: setLocalDescription — no SDP munging
+                self.log.debug("[subscribe] Step 3: setLocalDescription...")
                 pc.setLocalDescription(sdp) { error in
                     if let error {
                         self.log.error("[subscribe] setLocalDescription FAILED: \(error.localizedDescription)")
                         continuation.resume(throwing: BandwidthRTCError.sdpNegotiationFailed(error.localizedDescription))
                     } else {
-                        self.log.info("[subscribe] Step 3: setLocalDescription SUCCESS")
+                        self.log.debug("[subscribe] Step 3: setLocalDescription SUCCESS")
                         continuation.resume(returning: sdp.sdp)
                     }
                 }
@@ -380,11 +372,31 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         }
 
         subscribeSdpRevision = effectiveRevision
-        log.info("[subscribe] Complete (revision=\(effectiveRevision))")
+        log.debug("[subscribe] Complete (revision=\(effectiveRevision))")
         return answerSdp
     }
 
     // MARK: - Media Control
+
+    /// Remove local tracks for the given stream from the publishing peer connection.
+    /// After calling this, renegotiate by creating a new offer via `createPublishOffer`.
+    func removeLocalTracks(streamId: String) {
+        guard let pc = publishingPC, let stream = publishedStreams[streamId] else {
+            log.warn("removeLocalTracks: stream \(streamId) not found")
+            return
+        }
+
+        let trackIds = Set(stream.audioTracks.map { $0.trackId })
+        for sender in pc.senders {
+            if let trackId = sender.track?.trackId, trackIds.contains(trackId) {
+                pc.removeTrack(sender)
+                log.debug("Removed sender for track \(trackId)")
+            }
+        }
+
+        publishedStreams.removeValue(forKey: streamId)
+        log.debug("Removed local tracks for stream \(streamId)")
+    }
 
     func setAudioEnabled(_ enabled: Bool) {
         for (_, stream) in publishedStreams {
@@ -441,7 +453,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
                         let audioLevel = stat.values["audioLevel"] as? NSNumber
                         let totalAudioEnergy = stat.values["totalAudioEnergy"] as? NSNumber
                         let jitter = stat.values["jitter"] as? NSNumber
-                        self.log.info("[audio-stats] INBOUND: packets=\(packetsReceived), bytes=\(bytesReceived), audioLevel=\(audioLevel?.stringValue ?? "n/a"), energy=\(totalAudioEnergy?.stringValue ?? "n/a"), jitter=\(jitter?.stringValue ?? "?")")
+                        self.log.trace("[audio-stats] INBOUND: packets=\(packetsReceived), bytes=\(bytesReceived), audioLevel=\(audioLevel?.stringValue ?? "n/a"), energy=\(totalAudioEnergy?.stringValue ?? "n/a"), jitter=\(jitter?.stringValue ?? "?")")
                     }
                 }
             }
@@ -454,7 +466,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
                     if let kind = stat.values["kind"] as? String, kind == "audio" {
                         let packetsSent = stat.values["packetsSent"] as? NSNumber ?? 0
                         let bytesSent = stat.values["bytesSent"] as? NSNumber ?? 0
-                        self.log.info("[audio-stats] OUTBOUND: packets=\(packetsSent), bytes=\(bytesSent)")
+                        self.log.trace("[audio-stats] OUTBOUND: packets=\(packetsSent), bytes=\(bytesSent)")
                     }
                 }
             }
@@ -584,7 +596,7 @@ extension PeerConnectionManager: RTCPeerConnectionDelegate {
 
         // Log audio track details for debugging
         for track in stream.audioTracks {
-            log.info("  Audio track: \(track.trackId), enabled=\(track.isEnabled), state=\(track.readyState.rawValue)")
+            log.debug("  Audio track: \(track.trackId), enabled=\(track.isEnabled), state=\(track.readyState.rawValue)")
         }
 
         var mediaTypes: [MediaType] = []
@@ -621,14 +633,12 @@ extension PeerConnectionManager: RTCPeerConnectionDelegate {
         case .count: stateDesc = "count"
         @unknown default: stateDesc = "unknown(\(newState.rawValue))"
         }
-        log.info("ICE connection state [\(pcType)]: \(stateDesc)")
+        log.debug("ICE connection state [\(pcType)]: \(stateDesc)")
 
         if peerConnection === publishingPC {
             onPublishingIceConnectionStateChange?(newState)
             if newState == .connected || newState == .completed {
                 publishIceConnected = true
-                publishIceConnectedContinuation?.resume()
-                publishIceConnectedContinuation = nil
             }
         } else if peerConnection === subscribingPC {
             onSubscribingIceConnectionStateChange?(newState)
@@ -654,9 +664,9 @@ extension PeerConnectionManager: RTCPeerConnectionDelegate {
 
     func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
         let pcType = peerConnection === publishingPC ? "publish" : peerConnection === subscribingPC ? "subscribe" : "unknown"
-        log.info("Data channel opened on \(pcType) PC: \(dataChannel.label) (id=\(dataChannel.channelId))")
+        log.debug("Data channel opened on \(pcType) PC: \(dataChannel.label) (id=\(dataChannel.channelId))")
 
-        // Handle server-created data channels (matches JS SDK ondatachannel pattern)
+        // Handle server-created data channels (created in-band by the server)
         dataChannel.delegate = self
 
         if dataChannel.label == "__heartbeat__" {

@@ -8,6 +8,7 @@ public enum LogLevel: Int, Comparable, Sendable {
     case warn = 2
     case info = 3
     case debug = 4
+    case trace = 5
 
     public static func < (lhs: LogLevel, rhs: LogLevel) -> Bool {
         lhs.rawValue < rhs.rawValue
@@ -20,11 +21,16 @@ final class Logger: @unchecked Sendable {
 
     var level: LogLevel = .warn
 
-    private let osLog = os.Logger(subsystem: "com.bandwidth.brtc", category: "SDK")
+    private let osLog = os.Logger(subsystem: "com.bandwidth.rtc", category: "SDK")
 
     func debug(_ message: String) {
         guard level >= .debug else { return }
         osLog.debug("[BRTC] \(message, privacy: .public)")
+    }
+
+    func trace(_ message: String) {
+        guard level >= .trace else { return }
+        osLog.trace("[BRTC] \(message, privacy: .public)")
     }
 
     func info(_ message: String) {
