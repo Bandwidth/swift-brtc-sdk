@@ -6,14 +6,14 @@ import WebRTC
 ///
 /// Usage:
 /// ```swift
-/// let brtc = BandwidthRTC()
+/// let brtc = BandwidthRTCClient()
 /// brtc.onStreamAvailable = { stream in
 ///     // Handle remote audio streams
 /// }
 /// try await brtc.connect(authParams: .init(endpointToken: jwt))
 /// let localStream = try await brtc.publish(audio: true)
 /// ```
-public final class BandwidthRTC: @unchecked Sendable {
+public final class BandwidthRTCClient: @unchecked Sendable {
 
     // MARK: - Public Callbacks
 

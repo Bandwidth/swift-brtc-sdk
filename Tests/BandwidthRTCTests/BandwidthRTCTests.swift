@@ -9,8 +9,8 @@ final class BandwidthRTCTests: XCTestCase {
         signaling: MockSignalingClient = MockSignalingClient(),
         pcManager: MockPeerConnectionManager = MockPeerConnectionManager(),
         audioDevice: MockMixingAudioDevice = MockMixingAudioDevice()
-    ) -> BandwidthRTC {
-        BandwidthRTC(signaling: signaling, peerConnectionManager: pcManager, audioDevice: audioDevice)
+    ) -> BandwidthRTCClient {
+        BandwidthRTCClient(signaling: signaling, peerConnectionManager: pcManager, audioDevice: audioDevice)
     }
 
     private let validAuthParams = RtcAuthParams(endpointToken: "test-token")

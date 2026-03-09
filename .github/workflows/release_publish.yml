@@ -28,21 +28,23 @@ jobs:
 
           # Archive for iOS device
           xcodebuild archive \
-            -scheme BandwidthRTC-Package \
+            -scheme BandwidthRTC \
             -destination "generic/platform=iOS" \
             -archivePath build/ios.xcarchive \
             SKIP_INSTALL=NO \
             BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
-            MARKETING_VERSION="${VERSION}"
+            MARKETING_VERSION="${VERSION}" \
+            OTHER_SWIFT_FLAGS="-Xfrontend -no-verify-emitted-module-interface"
 
           # Archive for iOS Simulator
           xcodebuild archive \
-            -scheme BandwidthRTC-Package \
+            -scheme BandwidthRTC \
             -destination "generic/platform=iOS Simulator" \
             -archivePath build/ios-sim.xcarchive \
             SKIP_INSTALL=NO \
             BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
-            MARKETING_VERSION="${VERSION}"
+            MARKETING_VERSION="${VERSION}" \
+            OTHER_SWIFT_FLAGS="-Xfrontend -no-verify-emitted-module-interface"
 
           # Combine into XCFramework
           xcodebuild -create-xcframework \
