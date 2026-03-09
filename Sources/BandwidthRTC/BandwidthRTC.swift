@@ -274,37 +274,6 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         Logger.shared.info("File audio stopped")
     }
 
-    // MARK: - CallKit Integration
-
-    /// Call from `CXProviderDelegate.provider(_:didActivate:)` when integrating CallKit.
-    ///
-    /// CallKit activates the `AVAudioSession` before calling this delegate method.
-    /// Forwarding that event here lets the SDK start its audio engine at the correct moment,
-    /// avoiding the race condition where the engine starts before the session is routed.
-    ///
-    /// ```swift
-    /// func provider(_ provider: CXProvider, didActivate audioSession: AVAudioSession) {
-    ///     brtcClient.enableAudioSession()
-    /// }
-    /// ```
-    public func enableAudioSession() {
-        mixingDevice?.enableAudioSession()
-    }
-
-    /// Call from `CXProviderDelegate.provider(_:didDeactivate:)` when integrating CallKit.
-    ///
-    /// Stops the audio engine so the SDK releases the audio hardware before CallKit
-    /// deactivates the `AVAudioSession`.
-    ///
-    /// ```swift
-    /// func provider(_ provider: CXProvider, didDeactivate audioSession: AVAudioSession) {
-    ///     brtcClient.disableAudioSession()
-    /// }
-    /// ```
-    public func disableAudioSession() {
-        mixingDevice?.disableAudioSession()
-    }
-
     // MARK: - Media Control
 
     /// Enable or disable the microphone for all published streams.
