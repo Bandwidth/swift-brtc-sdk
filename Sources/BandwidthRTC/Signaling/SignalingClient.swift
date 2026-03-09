@@ -1,7 +1,7 @@
 import Foundation
 
 /// Default BRTC WebSocket gateway URL.
-private let defaultGatewayURL = "wss://us-east-2.gateway.pv.prod.global.aws.bandwidth.com/prod/gateway-service/api/v1/endpoints"
+private let defaultGatewayURL = "wss://gateway.pv.prod.global.aws.bandwidth.com/prod/gateway-service/api/v1/endpoints"
 
 /// SDK version reported to the gateway.
 private let sdkVersion = "0.1.0-ios"

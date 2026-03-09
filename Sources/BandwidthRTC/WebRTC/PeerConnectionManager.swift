@@ -386,12 +386,15 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             return
         }
 
-        let trackIds = Set(stream.audioTracks.map { $0.trackId })
-        for sender in pc.senders {
-            if let trackId = sender.track?.trackId, trackIds.contains(trackId) {
-                pc.removeTrack(sender)
-                log.debug("Removed sender for track \(trackId)")
+        for track in (stream.audioTracks as [RTCMediaStreamTrack]) {
+            let matchingTransceivers = pc.transceivers.filter { $0.sender.track?.trackId == track.trackId }
+            for transceiver in matchingTransceivers {
+                pc.removeTrack(transceiver.sender)
+                transceiver.stopInternal()
+                log.debug("Removed and stopped transceiver for track \(track.trackId)")
             }
+            // Disable the track (native equivalent of track.stop())
+            track.isEnabled = false
         }
 
         publishedStreams.removeValue(forKey: streamId)

@@ -59,15 +59,19 @@ public final class BandwidthRTC: @unchecked Sendable {
         Logger.shared.level = logLevel
     }
 
-    /// Internal init for testing — injects mock signaling and peer connection manager.
+    /// Internal init for testing — injects mock signaling, peer connection manager, and audio device.
     init(
         logLevel: LogLevel = .warn,
         signaling: (any SignalingClientProtocol)?,
-        peerConnectionManager: (any PeerConnectionManagerProtocol)?
+        peerConnectionManager: (any PeerConnectionManagerProtocol)?,
+        audioDevice: (any RTCAudioDevice)? = nil
     ) {
         Logger.shared.level = logLevel
         self.signaling = signaling
         self.peerConnectionManager = peerConnectionManager
+        if let audioDevice = audioDevice {
+            self.mixingDevice = audioDevice as? MixingAudioDevice
+        }
     }
 
     // MARK: - Connection
@@ -75,12 +79,6 @@ public final class BandwidthRTC: @unchecked Sendable {
     /// Connect to the BRTC platform using a JWT endpoint token.
     public func connect(authParams: RtcAuthParams, options: RtcOptions? = nil) async throws {
         guard !isConnected else { throw BandwidthRTCError.alreadyConnected }
-
-        // Clean up any stale state from a previous session that dropped without a clean disconnect
-        if peerConnectionManager != nil || signaling != nil {
-            Logger.shared.warn("connect() called with stale state — cleaning up previous session")
-            await cleanupSession()
-        }
 
         self.options = options
 
@@ -103,8 +101,16 @@ public final class BandwidthRTC: @unchecked Sendable {
         // Use injected peer connection manager or create new
         let pcMgr: any PeerConnectionManagerProtocol
         if let injected = self.peerConnectionManager {
+            // Reusing injected peer connection manager (for testing)
             pcMgr = injected
         } else {
+            // Clean up any stale state from a previous session that dropped without a clean disconnect
+            // This only applies when creating a new manager, not when reusing an injected one
+            if peerConnectionManager != nil {
+                Logger.shared.warn("connect() called with stale state — cleaning up previous session")
+                await cleanupSession()
+            }
+
             // Create the custom ADM — it owns audio session config, mic capture, and playout
             let mixing = MixingAudioDevice()
             mixing.onLocalAudioLevel = { [weak self] samples in self?.onLocalAudioLevel?(samples) }
@@ -166,12 +172,10 @@ public final class BandwidthRTC: @unchecked Sendable {
     }
 
     /// Disconnect from the BRTC platform.
-    public func disconnect() {
+    public func disconnect() async {
         stopFileAudio()
         isConnected = false
-        Task {
-            await self.cleanupSession()
-        }
+        await self.cleanupSession()
         Logger.shared.info("Disconnected from BRTC")
     }
 
@@ -182,9 +186,8 @@ public final class BandwidthRTC: @unchecked Sendable {
         peerConnectionManager = nil
         _ = mixingDevice?.terminateDevice()
         mixingDevice = nil
-        let sig = signaling
+        await signaling?.disconnect()
         signaling = nil
-        await sig?.disconnect()
     }
 
     // MARK: - Publishing

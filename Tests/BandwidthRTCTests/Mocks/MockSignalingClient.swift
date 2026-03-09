@@ -28,6 +28,7 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
     private(set) var connectCalledCount = 0
     private(set) var disconnectCalledCount = 0
     private(set) var answerSdpCalls: [(sdpAnswer: String, peerType: String)] = []
+    private(set) var offerSdpCallCount = 0
     private(set) var registeredEvents: [String] = []
     private(set) var removedEvents: [String] = []
 
@@ -78,6 +79,7 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
         lock.lock()
         let error = shouldThrowOnOfferSdp
         let result = offerSdpResult
+        offerSdpCallCount += 1
         lock.unlock()
         if let error { throw error }
         return result

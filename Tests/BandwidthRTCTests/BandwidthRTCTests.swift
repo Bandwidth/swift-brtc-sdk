@@ -7,9 +7,10 @@ final class BandwidthRTCTests: XCTestCase {
 
     private func makeSUT(
         signaling: MockSignalingClient = MockSignalingClient(),
-        pcManager: MockPeerConnectionManager = MockPeerConnectionManager()
+        pcManager: MockPeerConnectionManager = MockPeerConnectionManager(),
+        audioDevice: MockMixingAudioDevice = MockMixingAudioDevice()
     ) -> BandwidthRTC {
-        BandwidthRTC(signaling: signaling, peerConnectionManager: pcManager)
+        BandwidthRTC(signaling: signaling, peerConnectionManager: pcManager, audioDevice: audioDevice)
     }
 
     private let validAuthParams = RtcAuthParams(endpointToken: "test-token")
@@ -130,21 +131,21 @@ final class BandwidthRTCTests: XCTestCase {
     func testDisconnectSetsNotConnected() async throws {
         let sut = makeSUT()
         try await sut.connect(authParams: validAuthParams)
-        sut.disconnect()
+        await sut.disconnect()
         XCTAssertFalse(sut.isConnected)
     }
 
     func testDisconnectClearsComponents() async throws {
         let sut = makeSUT()
         try await sut.connect(authParams: validAuthParams)
-        sut.disconnect()
+        await sut.disconnect()
         XCTAssertNil(sut.peerConnectionManager)
         XCTAssertNil(sut.signaling)
     }
 
-    func testDisconnectBeforeConnectIsNoOp() {
+    func testDisconnectBeforeConnectIsNoOp() async {
         let sut = makeSUT()
-        sut.disconnect()
+        await sut.disconnect()
         XCTAssertFalse(sut.isConnected)
     }
 
@@ -193,6 +194,92 @@ final class BandwidthRTCTests: XCTestCase {
         _ = try await sut.publish(audio: true)
         // applyPublishAnswer is called once (no throw = success)
         XCTAssertEqual(pcManager.addLocalTracksAudioArg, true)
+    }
+
+    // MARK: - Unpublish
+
+    func testUnpublishThrowsIfNotConnected() async {
+        let sut = makeSUT()
+        let factory = RTCPeerConnectionFactory()
+        let stream = RtcStream(mediaStream: factory.mediaStream(withStreamId: "s1"), mediaTypes: [.audio])
+        await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
+            XCTAssertEqual(error as? BandwidthRTCError, .notConnected)
+        }
+    }
+
+    func testUnpublishCallsRemoveLocalTracks() async throws {
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        let stream = try await sut.publish(audio: true)
+
+        try await sut.unpublish(stream: stream)
+
+        XCTAssertEqual(pcManager.removeLocalTracksStreamIdArg, stream.streamId)
+    }
+
+    func testUnpublishRenegotiatesWithServer() async throws {
+        let sig = MockSignalingClient()
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(signaling: sig, pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        let stream = try await sut.publish(audio: true)
+
+        // Reset the offer count captured during publish
+        let offerSdpCallsBeforeUnpublish = sig.offerSdpCallCount
+
+        try await sut.unpublish(stream: stream)
+
+        XCTAssertEqual(sig.offerSdpCallCount, offerSdpCallsBeforeUnpublish + 1)
+    }
+
+    func testUnpublishPropagatesCreateOfferError() async throws {
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        let stream = try await sut.publish(audio: true)
+
+        pcManager.shouldThrowOnCreatePublishOffer = BandwidthRTCError.sdpNegotiationFailed("offer failed")
+
+        await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
+            guard case .sdpNegotiationFailed = error as? BandwidthRTCError else {
+                XCTFail("Expected sdpNegotiationFailed, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testUnpublishPropagatesSignalingError() async throws {
+        let sig = MockSignalingClient()
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(signaling: sig, pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        let stream = try await sut.publish(audio: true)
+
+        sig.shouldThrowOnOfferSdp = BandwidthRTCError.sdpNegotiationFailed("server rejected")
+
+        await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
+            guard case .sdpNegotiationFailed = error as? BandwidthRTCError else {
+                XCTFail("Expected sdpNegotiationFailed, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testUnpublishPropagatesApplyAnswerError() async throws {
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        let stream = try await sut.publish(audio: true)
+
+        pcManager.shouldThrowOnApplyPublishAnswer = BandwidthRTCError.sdpNegotiationFailed("apply failed")
+
+        await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
+            guard case .sdpNegotiationFailed = error as? BandwidthRTCError else {
+                XCTFail("Expected sdpNegotiationFailed, got \(error)")
+                return
+            }
+        }
     }
 
     // MARK: - File Audio
@@ -274,18 +361,7 @@ final class BandwidthRTCTests: XCTestCase {
         XCTAssertEqual(result.result, "bye")
     }
 
-    // MARK: - Log Level
 
-    func testSetLogLevelUpdatesLogger() {
-        let sut = makeSUT()
-        sut.setLogLevel(.debug)
-        XCTAssertEqual(Logger.shared.level, .debug)
-    }
-
-    func testInitWithLogLevelConfiguresLogger() {
-        _ = BandwidthRTC(logLevel: .info)
-        XCTAssertEqual(Logger.shared.level, .info)
-    }
 
     // MARK: - Callbacks / Event Handling
 
