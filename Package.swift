@@ -11,9 +11,21 @@ let package = Package(
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "114.0.0"),
     ],
     targets: [
+        // Code-generation tool invoked by the build plugin
+        .executableTarget(
+            name: "GenerateSDKVersionTool",
+            path: "Sources/GenerateSDKVersionTool"
+        ),
+        // Build plugin — runs GenerateSDKVersionTool before compiling BandwidthRTC
+        .plugin(
+            name: "GenerateSDKVersion",
+            capability: .buildTool(),
+            dependencies: ["GenerateSDKVersionTool"]
+        ),
         .target(
             name: "BandwidthRTC",
-            dependencies: [.product(name: "WebRTC", package: "WebRTC")]
+            dependencies: [.product(name: "WebRTC", package: "WebRTC")],
+            plugins: ["GenerateSDKVersion"]
         ),
         .testTarget(
             name: "BandwidthRTCTests",

@@ -1,0 +1,62 @@
+name: Publish Release
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build-xcframework:
+    # Only run for production (non-pre-release) releases
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        # Strip a leading "v" if present (v1.2.3 → 1.2.3)
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build XCFramework
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+
+          # Archive for iOS device
+          xcodebuild archive \
+            -scheme BandwidthRTC-Package \
+            -destination "generic/platform=iOS" \
+            -archivePath build/ios.xcarchive \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            MARKETING_VERSION="${VERSION}"
+
+          # Archive for iOS Simulator
+          xcodebuild archive \
+            -scheme BandwidthRTC-Package \
+            -destination "generic/platform=iOS Simulator" \
+            -archivePath build/ios-sim.xcarchive \
+            SKIP_INSTALL=NO \
+            BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            MARKETING_VERSION="${VERSION}"
+
+          # Combine into XCFramework
+          xcodebuild -create-xcframework \
+            -framework build/ios.xcarchive/Products/Library/Frameworks/BandwidthRTC.framework \
+            -framework build/ios-sim.xcarchive/Products/Library/Frameworks/BandwidthRTC.framework \
+            -output BandwidthRTC.xcframework
+
+          # Zip for upload
+          zip -r BandwidthRTC.xcframework.zip BandwidthRTC.xcframework
+
+      - name: Upload XCFramework to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" BandwidthRTC.xcframework.zip \
+            --clobber \
+            --repo "${{ github.repository }}"
