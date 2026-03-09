@@ -15,6 +15,12 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     private static let sampleRate: Double = 48000
     private static let framesPerChunk: Int = 480     // 10 ms at 48 kHz
+    private static let audioFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: sampleRate,
+        channels: 1,
+        interleaved: false
+    )!
 
     // MARK: - Logger
 
@@ -87,7 +93,13 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     func initialize(with delegate: any RTCAudioDeviceDelegate) -> Bool {
         self.delegate = delegate
-        configureAudioSession()
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+            try session.setActive(true)
+        } catch {
+            log.error("AVAudioSession config failed: \(error)")
+        }
         setupSourceNode()                   // attach before engine starts → no mid-run reconfig
         setupEngineConfigurationObserver()  // safety net for real-device route changes
         isInitialized = true
@@ -102,7 +114,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         }
         stopFilePlaybackTimer()
         engine.inputNode.removeTap(onBus: 0)
-        removePlayoutTap()
+        engine.mainMixerNode.removeTap(onBus: 0)
         if let node = sourceNode {
             engine.detach(node)
             sourceNode = nil
@@ -137,7 +149,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     func stopPlayout() -> Bool {
         isPlaying = false
-        removePlayoutTap()
+        engine.mainMixerNode.removeTap(onBus: 0)
         log.debug("Playout stopped")
         return true
     }
@@ -169,12 +181,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
     /// Load and resample an audio file to 48 kHz mono Float32.
     func loadFile(url: URL) throws {
         let audioFile = try AVAudioFile(forReading: url)
-        let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: Self.sampleRate,
-            channels: 1,
-            interleaved: false
-        )!
+        let targetFormat = Self.audioFormat
 
         let sourceFrameCount = AVAudioFrameCount(audioFile.length)
         let sourceBuffer = AVAudioPCMBuffer(
@@ -239,18 +246,6 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         }
     }
 
-    // MARK: - Private: Audio Session
-
-    private func configureAudioSession() {
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
-            try session.setActive(true)
-        } catch {
-            log.error("AVAudioSession config failed: \(error)")
-        }
-    }
-
     // MARK: - Private: AVAudioEngine Setup
 
     /// Subscribe to AVAudioEngineConfigurationChange so we can recover when the simulator (or device)
@@ -277,12 +272,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
     }
 
     private func setupSourceNode() {
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: Self.sampleRate,
-            channels: 1,
-            interleaved: false
-        )!
+        let format = Self.audioFormat
 
         let node = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList in
             guard let self, let delegate = self.delegate else {
@@ -337,7 +327,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
     /// Install a tap on the main mixer output to capture remote playout audio for visualization.
     private func installPlayoutTap() {
         let mixerNode = engine.mainMixerNode
-        mixerNode.removeTap(onBus: 0)
+        mixerNode.removeTap(onBus: 0)  // clear any stale tap before installing
         let format = mixerNode.outputFormat(forBus: 0)
         mixerNode.installTap(onBus: 0, bufferSize: 4800, format: format) { [weak self] buffer, _ in
             guard let self, let floatData = buffer.floatChannelData else { return }
@@ -353,22 +343,12 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         }
     }
 
-    private func removePlayoutTap() {
-        engine.mainMixerNode.removeTap(onBus: 0)
-    }
-
     /// Install a tap on the input node to capture mic audio directly.
     /// Mic audio is processed inline: deliver to WebRTC + visualization.
     private func installMicTap() {
         let inputNode = engine.inputNode
         let nativeFormat = inputNode.outputFormat(forBus: 0)
-
-        let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: Self.sampleRate,
-            channels: 1,
-            interleaved: false
-        )!
+        let targetFormat = Self.audioFormat
 
         if nativeFormat.sampleRate != Self.sampleRate || nativeFormat.channelCount != 1 {
             micConverter = AVAudioConverter(from: nativeFormat, to: targetFormat)

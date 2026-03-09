@@ -12,6 +12,7 @@ public enum BandwidthRTCError: Error, LocalizedError, Equatable {
     case notConnected
     case publishFailed(String)
     case rpcError(code: Int, message: String)
+    case notSupported(String)
 
     public var errorDescription: String? {
         switch self {
@@ -35,6 +36,8 @@ public enum BandwidthRTCError: Error, LocalizedError, Equatable {
             return "Publish failed: \(detail)"
         case .rpcError(let code, let message):
             return "RPC error (\(code)): \(message)"
+        case .notSupported(let detail):
+            return "Operation not supported: \(detail)"
         }
     }
 }
