@@ -13,7 +13,7 @@ jobs:
   build-xcframework:
     # Only run for production (non-pre-release) releases
     if: ${{ !github.event.release.prerelease }}
-    runs-on: macos-15
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
