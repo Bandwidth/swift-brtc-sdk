@@ -1,4 +1,5 @@
 import AVFoundation
+import CallKit
 import Foundation
 import WebRTC
 
@@ -12,6 +13,12 @@ import WebRTC
 /// }
 /// try await brtc.connect(authParams: .init(endpointToken: jwt))
 /// let localStream = try await brtc.publish(audio: true)
+/// ```
+///
+/// For native CallKit integration, set `callDelegate`:
+/// ```swift
+/// let brtc = BandwidthRTCClient()
+/// brtc.callDelegate = self  // conforms to BandwidthRTCCallDelegate
 /// ```
 public final class BandwidthRTCClient: @unchecked Sendable {
 
@@ -37,6 +44,22 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Array contains 480+ samples (10ms+ at 48kHz).
     public var onRemoteAudioLevel: (@Sendable ([Float32]) -> Void)?
 
+    // MARK: - CallKit Integration
+
+    /// Delegate for receiving high-level call lifecycle events.
+    /// Setting this enables CallKit integration automatically.
+    public weak var callDelegate: (any BandwidthRTCCallDelegate)?
+
+    /// Whether CallKit is enabled. Defaults to `true`.
+    /// Set to `false` to disable CallKit even when a delegate is set (useful for testing).
+    public var callKitEnabled: Bool = true
+
+    /// The current call state. Only meaningful when `callDelegate` is set.
+    public private(set) var callState: CallState = .idle
+
+    /// Metadata about the current call. Nil when `callState` is `.idle`.
+    public private(set) var currentCallInfo: CallInfo?
+
     // MARK: - Internal Components
 
     var signaling: (any SignalingClientProtocol)?
@@ -45,6 +68,12 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
     // Custom ADM — owns mic capture, file playback, and remote audio playout
     private var mixingDevice: MixingAudioDevice?
+
+    // CallKit manager (lazily created when callDelegate is set)
+    private var callKitManager: CallKitManager?
+
+    // Stream held until user answers an incoming call via CallKit
+    private var pendingIncomingStream: RtcStream?
 
     // MARK: - State
 
@@ -125,18 +154,55 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             pcMgr = newPCMgr
         }
 
+        // Initialize CallKit manager if delegate is set
+        if callDelegate != nil && callKitEnabled && callKitManager == nil {
+            let ckManager = CallKitManager()
+            ckManager.onUserAnswered = { [weak self] uuid in
+                Task { @MainActor in
+                    try? await self?.answerCall()
+                }
+            }
+            ckManager.onUserEnded = { [weak self] uuid in
+                Task { @MainActor in
+                    if self?.callState == .ringing {
+                        await self?.rejectCall()
+                    } else {
+                        try? await self?.endCall()
+                    }
+                }
+            }
+            callKitManager = ckManager
+        }
+
         // Wire up peer connection callbacks
         pcMgr.onStreamAvailable = { [weak self] stream, mediaTypes in
             let rtcStream = RtcStream(mediaStream: stream, mediaTypes: mediaTypes)
+            // Always fire raw callback for backward compatibility
             self?.onStreamAvailable?(rtcStream)
+            // If CallKit integration is active, manage call state
+            if let self, self.callDelegate != nil {
+                Task { @MainActor in
+                    self.handleStreamAvailableForCallKit(rtcStream)
+                }
+            }
         }
         pcMgr.onStreamUnavailable = { [weak self] streamId in
             self?.onStreamUnavailable?(streamId)
+            if let self, self.callDelegate != nil {
+                Task { @MainActor in
+                    self.handleStreamUnavailableForCallKit(streamId)
+                }
+            }
         }
         pcMgr.onSubscribingIceConnectionStateChange = { [weak self] state in
             if state == .disconnected || state == .failed {
                 Logger.shared.info("Subscribe ICE disconnected/failed — remote side likely hung up")
                 self?.onRemoteDisconnected?()
+                if let self, self.callDelegate != nil {
+                    Task { @MainActor in
+                        self.handleRemoteDisconnectedForCallKit()
+                    }
+                }
             }
         }
 
@@ -174,7 +240,14 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Disconnect from the BRTC platform.
     public func disconnect() async {
         stopFileAudio()
+        // End any active call through CallKit before tearing down the session
+        if callState != .idle {
+            callKitManager?.reportCallEnded(reason: .remoteEnded)
+            callKitManager?.deactivateAudioSessionForOutboundCall()
+            await MainActor.run { transitionToIdle() }
+        }
         isConnected = false
+        callKitManager = nil
         await self.cleanupSession()
         Logger.shared.info("Disconnected from BRTC")
     }
@@ -307,11 +380,21 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         )
     }
 
-    // MARK: - Call Control
+    // MARK: - Call Control (Low-Level)
 
     /// Request an outbound connection to a phone number, endpoint, or call ID.
     public func requestOutboundConnection(id: String, type: EndpointType) async throws -> OutboundConnectionResult {
         guard let sig = signaling, isConnected else { throw BandwidthRTCError.notConnected }
+
+        // If CallKit integration is active, track this as an outbound call
+        if callDelegate != nil {
+            let info = CallInfo(direction: .outbound, remoteParty: id)
+            currentCallInfo = info
+            callState = .connecting
+            callKitManager?.activateAudioSessionForOutboundCall()
+            await MainActor.run { notifyCallStateChange(.connecting) }
+        }
+
         return try await sig.requestOutboundConnection(id: id, type: type)
     }
 
@@ -319,6 +402,84 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     public func hangupConnection(endpoint: String, type: EndpointType) async throws -> HangupResult {
         guard let sig = signaling, isConnected else { throw BandwidthRTCError.notConnected }
         return try await sig.hangupConnection(endpoint: endpoint, type: type)
+    }
+
+    // MARK: - Call Control (High-Level / CallKit)
+
+    /// Answer an incoming call that was reported via the delegate.
+    ///
+    /// Unmutes the pending stream and transitions to `.active`.
+    @MainActor
+    public func answerCall() async throws {
+        guard callState == .ringing else {
+            throw BandwidthRTCError.noActiveCall
+        }
+
+        callState = .connecting
+        notifyCallStateChange(.connecting)
+
+        // Enable audio on the held stream
+        if let stream = pendingIncomingStream {
+            stream.mediaStream.audioTracks.forEach { $0.isEnabled = true }
+            pendingIncomingStream = nil
+            // Stream already available — go active immediately
+            callState = .active
+            callKitManager?.activateAudioSessionForOutboundCall()
+            notifyCallStateChange(.active)
+        }
+        // If stream hasn't arrived yet, handleStreamAvailableForCallKit will
+        // transition to .active when it does.
+    }
+
+    /// Reject an incoming call.
+    @MainActor
+    public func rejectCall() async {
+        guard callState == .ringing else { return }
+        callKitManager?.reportCallEnded(reason: .declinedElsewhere)
+        pendingIncomingStream?.mediaStream.audioTracks.forEach { $0.isEnabled = false }
+        pendingIncomingStream = nil
+        transitionToIdle()
+    }
+
+    /// End the current active or connecting call.
+    @MainActor
+    public func endCall() async throws {
+        guard callState == .active || callState == .connecting else { return }
+
+        callKitManager?.reportCallEnded(reason: .remoteEnded)
+        callKitManager?.deactivateAudioSessionForOutboundCall()
+
+        // Hang up on the signaling layer if we know the remote party
+        if let info = currentCallInfo, let remoteParty = info.remoteParty, let sig = signaling {
+            _ = try? await sig.hangupConnection(endpoint: remoteParty, type: .phoneNumber)
+        }
+
+        transitionToIdle()
+    }
+
+    /// Report an incoming call to CallKit from an external trigger (e.g. PushKit).
+    ///
+    /// Use this when your app receives a VoIP push notification before the
+    /// WebSocket stream arrives. The SDK will show the native call UI and wait
+    /// for the stream to arrive.
+    @MainActor
+    public func reportIncomingCall(callerName: String, completion: ((Error?) -> Void)? = nil) {
+        let info = CallInfo(direction: .inbound, remoteParty: callerName)
+        currentCallInfo = info
+        callState = .ringing
+
+        callKitManager?.reportIncomingCall(callerName: callerName) { [weak self] error in
+            if let error {
+                Task { @MainActor in
+                    self?.callDelegate?.bandwidthRTC(self!, callDidFailWithError: error, info: info)
+                    self?.transitionToIdle()
+                }
+            }
+            completion?(error)
+        }
+
+        callDelegate?.bandwidthRTC(self, didReceiveIncomingCall: info)
+        notifyCallStateChange(.ringing)
     }
 
     // MARK: - Configuration
@@ -364,6 +525,89 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             Logger.shared.warn("WebSocket closed")
             self?.isConnected = false
         }
+    }
+
+    // MARK: - Private: CallKit State Handlers
+
+    @MainActor
+    private func handleStreamAvailableForCallKit(_ stream: RtcStream) {
+        switch callState {
+        case .idle:
+            // Unexpected stream while idle = incoming call
+            pendingIncomingStream = stream
+            stream.mediaStream.audioTracks.forEach { $0.isEnabled = false }
+
+            let info = CallInfo(direction: .inbound, remoteParty: stream.alias)
+            currentCallInfo = info
+            callState = .ringing
+
+            callKitManager?.reportIncomingCall(callerName: stream.alias ?? "Incoming Call") { [weak self] error in
+                if let error, let self {
+                    Task { @MainActor in
+                        self.callDelegate?.bandwidthRTC(self, callDidFailWithError: error, info: info)
+                    }
+                }
+            }
+
+            callDelegate?.bandwidthRTC(self, didReceiveIncomingCall: info)
+            notifyCallStateChange(.ringing)
+
+        case .ringing:
+            // Stream arrived while ringing — hold it until user answers
+            pendingIncomingStream = stream
+            stream.mediaStream.audioTracks.forEach { $0.isEnabled = false }
+
+        case .connecting:
+            // Stream arrived after user answered or during outbound call — go active
+            callState = .active
+            notifyCallStateChange(.active)
+
+        case .active, .ended:
+            break
+        }
+    }
+
+    @MainActor
+    private func handleStreamUnavailableForCallKit(_ streamId: String) {
+        if callState == .active {
+            callKitManager?.reportCallEnded(reason: .remoteEnded)
+            callKitManager?.deactivateAudioSessionForOutboundCall()
+            transitionToIdle()
+        }
+    }
+
+    @MainActor
+    private func handleRemoteDisconnectedForCallKit() {
+        switch callState {
+        case .ringing:
+            callKitManager?.reportCallEnded(reason: .remoteEnded)
+            pendingIncomingStream = nil
+            transitionToIdle()
+        case .connecting, .active:
+            callKitManager?.reportCallEnded(reason: .remoteEnded)
+            callKitManager?.deactivateAudioSessionForOutboundCall()
+            transitionToIdle()
+        case .idle, .ended:
+            break
+        }
+    }
+
+    @MainActor
+    private func transitionToIdle() {
+        let oldInfo = currentCallInfo
+        let oldState = callState
+        callState = .idle
+        currentCallInfo = nil
+        pendingIncomingStream = nil
+        if oldState != .idle, let info = oldInfo {
+            callDelegate?.bandwidthRTC(self, callDidChangeState: .ended, info: info)
+        }
+    }
+
+    @MainActor
+    private func notifyCallStateChange(_ state: CallState) {
+        guard let info = currentCallInfo else { return }
+        callDelegate?.bandwidthRTC(self, callDidChangeState: state, info: info)
     }
 
     private func handleSubscribeSdpOffer(_ data: Data) async {
