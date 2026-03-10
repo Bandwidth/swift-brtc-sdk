@@ -307,6 +307,26 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         )
     }
 
+    // MARK: - Audio Session
+
+    /// Notify WebRTC that the audio session has been activated (e.g. by CallKit or manual setup).
+    /// Call this from your CXProviderDelegate's `provider(_:didActivate:)` or after manually
+    /// activating the audio session for outbound calls.
+    public func enableAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        RTCAudioSession.sharedInstance().audioSessionDidActivate(session)
+        Logger.shared.debug("Audio session activated (notified WebRTC)")
+    }
+
+    /// Notify WebRTC that the audio session has been deactivated (e.g. by CallKit or manual teardown).
+    /// Call this from your CXProviderDelegate's `provider(_:didDeactivate:)` or after manually
+    /// deactivating the audio session when a call ends.
+    public func disableAudioSession() {
+        let session = AVAudioSession.sharedInstance()
+        RTCAudioSession.sharedInstance().audioSessionDidDeactivate(session)
+        Logger.shared.debug("Audio session deactivated (notified WebRTC)")
+    }
+
     // MARK: - Call Control
 
     /// Request an outbound connection to a phone number, endpoint, or call ID.
