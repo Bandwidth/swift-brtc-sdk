@@ -12,7 +12,6 @@ final class MockMixingAudioDevice: NSObject, RTCAudioDevice, @unchecked Sendable
 
     // MARK: - State tracking
 
-    private(set) var isPlayingFile: Bool = false
     private(set) var recordingEnabled: Bool = false
     private(set) var playoutEnabled: Bool = false
 
