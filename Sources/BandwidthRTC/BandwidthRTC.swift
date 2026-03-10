@@ -75,10 +75,13 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     // Stream held until user answers an incoming call via CallKit
     private var pendingIncomingStream: RtcStream?
 
+    // Stream ID of the call that is currently ringing/connecting/active.
+    // Used to ignore stale "stream unavailable" events from the previous call.
+    private var currentCallStreamId: String?
+
     // MARK: - State
 
     private(set) public var isConnected = false
-    public private(set) var isPlayingFileAudio: Bool = false
 
     // No pending SDP offers — both are answered during connect() init.
 
@@ -239,7 +242,6 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
     /// Disconnect from the BRTC platform.
     public func disconnect() async {
-        stopFileAudio()
         // End any active call through CallKit before tearing down the session
         if callState != .idle {
             callKitManager?.reportCallEnded(reason: .remoteEnded)
@@ -317,33 +319,6 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
 
         Logger.shared.info("Unpublished stream \(stream.streamId)")
-    }
-
-    /// Swap the publish stream's audio source to the given file.
-    /// The file is injected into the existing publish peer connection via `MixingAudioDevice`.
-    public func publishFileAudio(url: URL) async throws {
-        guard isConnected else {
-            throw BandwidthRTCError.notConnected
-        }
-
-        guard let mixing = mixingDevice else {
-            throw BandwidthRTCError.notConnected
-        }
-
-        // Stop any previously playing file audio before starting new
-        stopFileAudio()
-
-        try mixing.loadFile(url: url)
-        mixing.startFilePlayback()
-        isPlayingFileAudio = true
-        Logger.shared.info("File audio started: \(url.lastPathComponent)")
-    }
-
-    /// Restore microphone as the audio source for the publish stream.
-    public func stopFileAudio() {
-        mixingDevice?.stopFilePlayback()
-        isPlayingFileAudio = false
-        Logger.shared.info("File audio stopped")
     }
 
     // MARK: - Media Control
@@ -529,6 +504,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         case .idle:
             // Unexpected stream while idle = incoming call
             pendingIncomingStream = stream
+            currentCallStreamId = stream.streamId
             stream.mediaStream.audioTracks.forEach { $0.isEnabled = false }
 
             let info = CallInfo(direction: .inbound, remoteParty: stream.alias)
@@ -549,10 +525,12 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         case .ringing:
             // Stream arrived while ringing — hold it until user answers
             pendingIncomingStream = stream
+            currentCallStreamId = stream.streamId
             stream.mediaStream.audioTracks.forEach { $0.isEnabled = false }
 
         case .connecting:
             // Stream arrived after user answered or during outbound call — go active
+            currentCallStreamId = stream.streamId
             stream.mediaStream.audioTracks.forEach { $0.isEnabled = true }
             callState = .active
             notifyCallStateChange(.active)
@@ -565,6 +543,10 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     @MainActor
     private func handleStreamUnavailableForCallKit(_ streamId: String) {
         guard callState != .idle else { return }
+        guard streamId == currentCallStreamId else {
+            Logger.shared.debug("Ignoring stale stream unavailable for \(streamId) (current: \(currentCallStreamId ?? "nil"))")
+            return
+        }
         callKitManager?.reportCallEnded(reason: .remoteEnded)
         transitionToIdle()
     }
@@ -583,6 +565,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         let oldState = callState
         callState = .idle
         currentCallInfo = nil
+        currentCallStreamId = nil
         pendingIncomingStream = nil
         if oldState != .idle, let info = oldInfo {
             callDelegate?.bandwidthRTC(self, callDidChangeState: .ended, info: info)
@@ -592,6 +575,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     @MainActor
     private func notifyCallStateChange(_ state: CallState) {
         guard let info = currentCallInfo else { return }
+        Logger.shared.debug("Call state changed: \(state) (remote: \(info.remoteParty ?? "unknown"))")
         callDelegate?.bandwidthRTC(self, callDidChangeState: state, info: info)
     }
 

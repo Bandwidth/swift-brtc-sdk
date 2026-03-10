@@ -4,8 +4,7 @@ import WebRTC
 /// Simplified RTCAudioDevice for capturing mic audio and playing remote audio.
 ///
 /// Recording path:
-///   - Normal mode: Mic tap → deliver directly to WebRTC + visualization callback
-///   - File mode: Timer reads from resampled PCM buffer → WebRTC + visualization callback
+///   - Mic tap → deliver directly to WebRTC + visualization callback
 ///
 /// Playout path:
 ///   - AVAudioSourceNode render callback pulls Int16 PCM from WebRTC via getPlayoutData, converts to Float32
@@ -14,13 +13,14 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
     // MARK: - Constants
 
     private static let sampleRate: Double = 48000
-    private static let framesPerChunk: Int = 480     // 10 ms at 48 kHz
     private static let audioFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: sampleRate,
         channels: 1,
         interleaved: false
     )!
+    /// Precomputed reciprocal so the render callback does a multiply instead of a divide.
+    private static let int16ToFloat: Float32 = 1.0 / Float32(Int16.max)
 
     // MARK: - Logger
 
@@ -37,15 +37,9 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
     private var sourceNode: AVAudioSourceNode?
     private var micConverter: AVAudioConverter?
 
-    // MARK: - File audio (for file playback mode)
-
-    private var filePCMBuffer: AVAudioPCMBuffer?
-    private var fileReadPos: Int = 0
-    private(set) var isPlayingFile: Bool = false
-
     // MARK: - Audio level callbacks
 
-    /// Called with Float32 samples for visualization after each mic capture or file chunk.
+    /// Called with Float32 samples for visualization after each mic capture.
     var onLocalAudioLevel: (([Float32]) -> Void)?
 
     /// Called with Float32 samples for visualization after each remote audio playout chunk.
@@ -55,10 +49,6 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     private var engineConfigObserver: NSObjectProtocol?
 
-    // MARK: - Timers
-
-    private var filePlaybackTimer: DispatchSourceTimer?
-
     // MARK: - Timestamp tracking
 
     private var recordSampleTime: Double = 0
@@ -66,8 +56,13 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     // MARK: - Render thread buffers (pre-allocated to avoid heap alloc on real-time thread)
 
-    private var playoutInt16Buf = [Int16](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
-    private var recordInt16Buf  = [Int16](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
+    private var playoutInt16Buf  = [Int16](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
+    private var recordInt16Buf   = [Int16](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
+    private var micFloat32Buf    = [Float32](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
+    /// Pre-allocated mono mix buffer for the remote playout tap — avoids per-cycle heap allocation.
+    private var remoteFloat32Buf = [Float32](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
+    /// Pre-allocated output buffer for mic sample-rate conversion — avoids per-cycle allocation.
+    private var micConversionBuf: AVAudioPCMBuffer?
 
     // MARK: - RTCAudioDevice: State
 
@@ -112,7 +107,6 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
             NotificationCenter.default.removeObserver(obs)
             engineConfigObserver = nil
         }
-        stopFilePlaybackTimer()
         engine.inputNode.removeTap(onBus: 0)
         engine.mainMixerNode.removeTap(onBus: 0)
         if let node = sourceNode {
@@ -121,6 +115,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         }
         if engine.isRunning { engine.stop() }
         micConverter = nil
+        micConversionBuf = nil
         delegate = nil
         isInitialized = false
         isPlayoutInitialized = false
@@ -176,76 +171,6 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         return true
     }
 
-    // MARK: - File Playback Control
-
-    /// Load and resample an audio file to 48 kHz mono Float32.
-    func loadFile(url: URL) throws {
-        let audioFile = try AVAudioFile(forReading: url)
-        let targetFormat = Self.audioFormat
-
-        let sourceFrameCount = AVAudioFrameCount(audioFile.length)
-        let sourceBuffer = AVAudioPCMBuffer(
-            pcmFormat: audioFile.processingFormat,
-            frameCapacity: sourceFrameCount
-        )!
-        try audioFile.read(into: sourceBuffer)
-        sourceBuffer.frameLength = sourceFrameCount
-
-        let srcFormat = audioFile.processingFormat
-        let converted: AVAudioPCMBuffer
-        if srcFormat.sampleRate == Self.sampleRate,
-           srcFormat.channelCount == 1,
-           srcFormat.commonFormat == .pcmFormatFloat32
-        {
-            converted = sourceBuffer
-        } else {
-            guard let converter = AVAudioConverter(from: srcFormat, to: targetFormat) else {
-                log.error("Cannot create converter for \(srcFormat)")
-                throw NSError(
-                    domain: "MixingAudioDevice",
-                    code: -1,
-                    userInfo: [NSLocalizedDescriptionKey: "Cannot create AVAudioConverter for file"]
-                )
-            }
-            let ratio = Self.sampleRate / srcFormat.sampleRate
-            let capacity = AVAudioFrameCount(Double(sourceFrameCount) * ratio) + 1
-            let outputBuffer = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)!
-            var convertError: NSError?
-            var inputProvided = false
-            converter.convert(to: outputBuffer, error: &convertError) { _, outStatus in
-                if inputProvided { outStatus.pointee = .noDataNow; return nil }
-                outStatus.pointee = .haveData
-                inputProvided = true
-                return sourceBuffer
-            }
-            if let err = convertError { throw err }
-            converted = outputBuffer
-        }
-
-        audioQueue.sync {
-            self.filePCMBuffer = converted
-            self.fileReadPos = 0
-        }
-        log.debug("File loaded: \(url.lastPathComponent), \(converted.frameLength) frames at 48kHz")
-    }
-
-    func startFilePlayback() {
-        audioQueue.async {
-            self.isPlayingFile = true
-            self.startFilePlaybackTimer()
-            self.log.debug("File playback started")
-        }
-    }
-
-    func stopFilePlayback() {
-        audioQueue.async {
-            self.isPlayingFile = false
-            self.fileReadPos = 0
-            self.stopFilePlaybackTimer()
-            self.log.debug("File playback stopped")
-        }
-    }
-
     // MARK: - Private: AVAudioEngine Setup
 
     /// Subscribe to AVAudioEngineConfigurationChange so we can recover when the simulator (or device)
@@ -267,6 +192,8 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         engine.stop()
         startEngineIfNeeded()
         if isPlaying {
+            // Remove the stale tap before reinstalling to avoid double-tap overload
+            engine.mainMixerNode.removeTap(onBus: 0)
             installPlayoutTap()
         }
     }
@@ -312,8 +239,9 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
             // Convert Int16 → Float32 into the output buffer
             let abl = UnsafeMutableAudioBufferListPointer(audioBufferList)
             guard let outPtr = abl[0].mData?.assumingMemoryBound(to: Float32.self) else { return noErr }
+            let scale = MixingAudioDevice.int16ToFloat
             for i in 0..<count {
-                outPtr[i] = Float32(self.playoutInt16Buf[i]) / Float32(Int16.max)
+                outPtr[i] = Float32(self.playoutInt16Buf[i]) * scale
             }
 
             return noErr
@@ -333,13 +261,21 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
             guard let self, let floatData = buffer.floatChannelData else { return }
             let count = Int(buffer.frameLength)
             let channelCount = Int(buffer.format.channelCount)
-            var mono = [Float32](repeating: 0, count: count)
+            // Grow pre-allocated buffer only if needed — no heap alloc on the hot path
+            if count > self.remoteFloat32Buf.count {
+                self.remoteFloat32Buf = [Float32](repeating: 0, count: count)
+            }
             for i in 0..<count {
                 var s: Float = 0
                 for ch in 0..<channelCount { s += floatData[ch][i] }
-                mono[i] = max(-1.0, min(1.0, s / Float(max(1, channelCount))))
+                self.remoteFloat32Buf[i] = max(-1.0, min(1.0, s / Float(max(1, channelCount))))
             }
-            self.onRemoteAudioLevel?(mono)
+            // Copy only what we need before hopping to the main queue
+            let samples = Array(self.remoteFloat32Buf[0..<count])
+            // Dispatch off the real-time audio thread before invoking app-level callback
+            DispatchQueue.main.async { [weak self] in
+                self?.onRemoteAudioLevel?(samples)
+            }
         }
     }
 
@@ -352,16 +288,19 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
         if nativeFormat.sampleRate != Self.sampleRate || nativeFormat.channelCount != 1 {
             micConverter = AVAudioConverter(from: nativeFormat, to: targetFormat)
+            // Pre-allocate the output buffer for conversion — avoids per-callback heap allocation.
+            // Use 4× the tap bufferSize as capacity to absorb any engine-side buffer variance.
+            let ratio = Self.sampleRate / nativeFormat.sampleRate
+            let capacity = AVAudioFrameCount(Double(4096) * ratio) + 1
+            micConversionBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)
         }
 
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: nativeFormat) { [weak self] buffer, _ in
-            guard let self, !self.isPlayingFile else { return }
+            guard let self else { return }
 
             let converted: AVAudioPCMBuffer
-            if let conv = self.micConverter {
-                let ratio = Self.sampleRate / nativeFormat.sampleRate
-                let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1
-                let out = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)!
+            if let conv = self.micConverter, let out = self.micConversionBuf {
+                out.frameLength = 0  // reset before reuse
                 var convError: NSError?
                 var consumed = false
                 conv.convert(to: out, error: &convError) { _, status in
@@ -386,16 +325,24 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
         let count = Int(buffer.frameLength)
         let channels = Int(buffer.format.channelCount)
-        var float32Samples = [Float32](repeating: 0, count: count)
+
+        // Grow pre-allocated buffer only if needed — no heap alloc on the hot path
+        if count > micFloat32Buf.count {
+            micFloat32Buf = [Float32](repeating: 0, count: count)
+        }
 
         for i in 0..<count {
             var sample: Float = 0
             for ch in 0..<channels { sample += floatData[ch][i] }
-            float32Samples[i] = max(-1.0, min(1.0, sample / Float(channels)))
+            micFloat32Buf[i] = max(-1.0, min(1.0, sample / Float(channels)))
         }
 
-        deliverSamplesToWebRTC(float32Samples)
-        onLocalAudioLevel?(float32Samples)
+        deliverSamplesToWebRTC(count: count)
+        // Copy only what we need before hopping to the main queue
+        let samples = Array(micFloat32Buf[0..<count])
+        DispatchQueue.main.async { [weak self] in
+            self?.onLocalAudioLevel?(samples)
+        }
     }
 
     private func startEngineIfNeeded() {
@@ -408,55 +355,19 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         }
     }
 
-    // MARK: - Private: File Playback Timer
-
-    private func startFilePlaybackTimer() {
-        guard filePlaybackTimer == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: audioQueue)
-        timer.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(5))
-        timer.setEventHandler { [weak self] in self?.deliverFileChunk() }
-        timer.resume()
-        filePlaybackTimer = timer
-    }
-
-    private func stopFilePlaybackTimer() {
-        filePlaybackTimer?.cancel()
-        filePlaybackTimer = nil
-    }
-
-    private func deliverFileChunk() {
-        guard let buf = filePCMBuffer, let floatData = buf.floatChannelData else { return }
-
-        let total = Int(buf.frameLength)
-        if fileReadPos >= total {
-            log.debug("File looped")
-            fileReadPos = 0
-        }
-
-        let frames = min(Self.framesPerChunk, total - fileReadPos)
-        var float32Samples = [Float32](repeating: 0, count: Self.framesPerChunk)
-
-        let src = floatData[0] + fileReadPos
-        for i in 0..<frames {
-            float32Samples[i] = max(-1.0, min(1.0, src[i]))
-        }
-        fileReadPos += frames
-
-        deliverSamplesToWebRTC(float32Samples)
-        onLocalAudioLevel?(float32Samples)
-    }
-
     // MARK: - Private: Deliver Samples to WebRTC
 
-    private func deliverSamplesToWebRTC(_ samples: [Float32]) {
+    /// Convert `micFloat32Buf[0..<count]` to Int16 and deliver to WebRTC.
+    /// Caller must have already written `count` valid samples into `micFloat32Buf`.
+    private func deliverSamplesToWebRTC(count: Int) {
         guard let delegate else { return }
 
-        let count = samples.count
         if count > recordInt16Buf.count {
             recordInt16Buf = [Int16](repeating: 0, count: count)
         }
+        let int16Max = Float(Int16.max)
         for i in 0..<count {
-            recordInt16Buf[i] = Int16(samples[i] * Float(Int16.max))
+            recordInt16Buf[i] = Int16(micFloat32Buf[i] * int16Max)
         }
 
         recordInt16Buf.withUnsafeMutableBytes { rawBytes in
