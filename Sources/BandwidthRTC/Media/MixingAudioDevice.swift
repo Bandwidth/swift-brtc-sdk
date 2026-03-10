@@ -8,7 +8,7 @@ import WebRTC
 ///
 /// Playout path:
 ///   - AVAudioSourceNode render callback pulls Int16 PCM from WebRTC via getPlayoutData, converts to Float32
-final class MixingAudioDevice: NSObject, RTCAudioDevice {
+public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     // MARK: - Constants
 
@@ -37,13 +37,19 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
     private var sourceNode: AVAudioSourceNode?
     private var micConverter: AVAudioConverter?
 
+    // MARK: - Init
+
+    public override init() {
+        super.init()
+    }
+
     // MARK: - Audio level callbacks
 
     /// Called with Float32 samples for visualization after each mic capture.
-    var onLocalAudioLevel: (([Float32]) -> Void)?
+    public var onLocalAudioLevel: (([Float32]) -> Void)?
 
     /// Called with Float32 samples for visualization after each remote audio playout chunk.
-    var onRemoteAudioLevel: (([Float32]) -> Void)?
+    public var onRemoteAudioLevel: (([Float32]) -> Void)?
 
     // MARK: - Engine configuration change observer
 
@@ -56,37 +62,37 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     // MARK: - Render thread buffers (pre-allocated to avoid heap alloc on real-time thread)
 
-    private var playoutInt16Buf  = [Int16](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
-    private var recordInt16Buf   = [Int16](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
-    private var micFloat32Buf    = [Float32](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
+    private var playoutInt16Buf  = [Int16](repeating: 0, count: 960)
+    private var recordInt16Buf   = [Int16](repeating: 0, count: 960)
+    private var micFloat32Buf    = [Float32](repeating: 0, count: 960)
     /// Pre-allocated mono mix buffer for the remote playout tap — avoids per-cycle heap allocation.
-    private var remoteFloat32Buf = [Float32](repeating: 0, count: MixingAudioDevice.framesPerChunk * 2)
+    private var remoteFloat32Buf = [Float32](repeating: 0, count: 960)
     /// Pre-allocated output buffer for mic sample-rate conversion — avoids per-cycle allocation.
     private var micConversionBuf: AVAudioPCMBuffer?
 
     // MARK: - RTCAudioDevice: State
 
-    private(set) var isInitialized: Bool = false
-    private(set) var isPlayoutInitialized: Bool = false
-    private(set) var isPlaying: Bool = false
-    private(set) var isRecordingInitialized: Bool = false
-    private(set) var isRecording: Bool = false
+    public private(set) var isInitialized: Bool = false
+    public private(set) var isPlayoutInitialized: Bool = false
+    public private(set) var isPlaying: Bool = false
+    public private(set) var isRecordingInitialized: Bool = false
+    public private(set) var isRecording: Bool = false
 
     // MARK: - RTCAudioDevice: Format
 
-    var deviceInputSampleRate: Double { Self.sampleRate }
-    var inputIOBufferDuration: TimeInterval { 0.01 }
-    var inputNumberOfChannels: Int { 1 }
-    var inputLatency: TimeInterval { AVAudioSession.sharedInstance().inputLatency }
+    public var deviceInputSampleRate: Double { Self.sampleRate }
+    public var inputIOBufferDuration: TimeInterval { 0.01 }
+    public var inputNumberOfChannels: Int { 1 }
+    public var inputLatency: TimeInterval { AVAudioSession.sharedInstance().inputLatency }
 
-    var deviceOutputSampleRate: Double { Self.sampleRate }
-    var outputIOBufferDuration: TimeInterval { 0.01 }
-    var outputNumberOfChannels: Int { 1 }
-    var outputLatency: TimeInterval { AVAudioSession.sharedInstance().outputLatency }
+    public var deviceOutputSampleRate: Double { Self.sampleRate }
+    public var outputIOBufferDuration: TimeInterval { 0.01 }
+    public var outputNumberOfChannels: Int { 1 }
+    public var outputLatency: TimeInterval { AVAudioSession.sharedInstance().outputLatency }
 
     // MARK: - RTCAudioDevice: Lifecycle
 
-    func initialize(with delegate: any RTCAudioDeviceDelegate) -> Bool {
+    public func initialize(with delegate: any RTCAudioDeviceDelegate) -> Bool {
         self.delegate = delegate
         do {
             let session = AVAudioSession.sharedInstance()
@@ -102,7 +108,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         return true
     }
 
-    func terminateDevice() -> Bool {
+    public func terminateDevice() -> Bool {
         if let obs = engineConfigObserver {
             NotificationCenter.default.removeObserver(obs)
             engineConfigObserver = nil
@@ -128,13 +134,13 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     // MARK: - RTCAudioDevice: Playout
 
-    func initializePlayout() -> Bool {
+    public func initializePlayout() -> Bool {
         isPlayoutInitialized = true
         log.debug("Playout initialized")
         return true
     }
 
-    func startPlayout() -> Bool {
+    public func startPlayout() -> Bool {
         isPlaying = true
         startEngineIfNeeded()
         installPlayoutTap()
@@ -142,7 +148,7 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
         return true
     }
 
-    func stopPlayout() -> Bool {
+    public func stopPlayout() -> Bool {
         isPlaying = false
         engine.mainMixerNode.removeTap(onBus: 0)
         log.debug("Playout stopped")
@@ -151,21 +157,21 @@ final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     // MARK: - RTCAudioDevice: Recording
 
-    func initializeRecording() -> Bool {
+    public func initializeRecording() -> Bool {
         installMicTap()
         isRecordingInitialized = true
         log.debug("Recording initialized")
         return true
     }
 
-    func startRecording() -> Bool {
+    public func startRecording() -> Bool {
         isRecording = true
         startEngineIfNeeded()
         log.debug("Recording started")
         return true
     }
 
-    func stopRecording() -> Bool {
+    public func stopRecording() -> Bool {
         isRecording = false
         log.debug("Recording stopped")
         return true

@@ -66,8 +66,8 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     var peerConnectionManager: (any PeerConnectionManagerProtocol)?
     private var options: RtcOptions?
 
-    // Custom ADM — owns mic capture, file playback, and remote audio playout
-    private var mixingDevice: MixingAudioDevice?
+    // Custom ADM — owns mic capture and remote audio playout
+    public private(set) var mixingDevice: MixingAudioDevice?
 
     // CallKit manager (lazily created when callDelegate is set)
     private var callKitManager: CallKitManager?
