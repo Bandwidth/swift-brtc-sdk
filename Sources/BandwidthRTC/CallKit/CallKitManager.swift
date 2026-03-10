@@ -123,28 +123,4 @@ final class CallKitManager: NSObject, CXProviderDelegate, @unchecked Sendable {
         RTCAudioSession.sharedInstance().audioSessionDidDeactivate(audioSession)
     }
 
-    // MARK: - Manual Audio Session (non-CallKit outbound calls)
-
-    /// Configures and activates the audio session for outbound calls that don't
-    /// go through CallKit. Must be called after the call is established.
-    func activateAudioSessionForOutboundCall() {
-        let session = AVAudioSession.sharedInstance()
-        do {
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
-            try session.setActive(true)
-            RTCAudioSession.sharedInstance().audioSessionDidActivate(session)
-        } catch {
-            Logger.shared.error("Failed to activate audio session: \(error)")
-        }
-    }
-
-    func deactivateAudioSessionForOutboundCall() {
-        let session = AVAudioSession.sharedInstance()
-        RTCAudioSession.sharedInstance().audioSessionDidDeactivate(session)
-        do {
-            try session.setActive(false, options: .notifyOthersOnDeactivation)
-        } catch {
-            Logger.shared.error("Failed to deactivate audio session: \(error)")
-        }
-    }
 }

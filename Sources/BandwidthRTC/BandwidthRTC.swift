@@ -243,7 +243,6 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         // End any active call through CallKit before tearing down the session
         if callState != .idle {
             callKitManager?.reportCallEnded(reason: .remoteEnded)
-            callKitManager?.deactivateAudioSessionForOutboundCall()
             await MainActor.run { transitionToIdle() }
         }
         isConnected = false
@@ -391,7 +390,6 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             let info = CallInfo(direction: .outbound, remoteParty: id)
             currentCallInfo = info
             callState = .connecting
-            callKitManager?.activateAudioSessionForOutboundCall()
             await MainActor.run { notifyCallStateChange(.connecting) }
         }
 
@@ -415,20 +413,17 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             throw BandwidthRTCError.noActiveCall
         }
 
-        callState = .connecting
-        notifyCallStateChange(.connecting)
-
-        // Enable audio on the held stream
         if let stream = pendingIncomingStream {
+            // Stream already here — enable audio and go active immediately
             stream.mediaStream.audioTracks.forEach { $0.isEnabled = true }
             pendingIncomingStream = nil
-            // Stream already available — go active immediately
             callState = .active
-            callKitManager?.activateAudioSessionForOutboundCall()
             notifyCallStateChange(.active)
+        } else {
+            // Stream not yet arrived — handleStreamAvailableForCallKit will finish the transition
+            callState = .connecting
+            notifyCallStateChange(.connecting)
         }
-        // If stream hasn't arrived yet, handleStreamAvailableForCallKit will
-        // transition to .active when it does.
     }
 
     /// Reject an incoming call.
@@ -447,7 +442,6 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         guard callState == .active || callState == .connecting else { return }
 
         callKitManager?.reportCallEnded(reason: .remoteEnded)
-        callKitManager?.deactivateAudioSessionForOutboundCall()
 
         // Hang up on the signaling layer if we know the remote party
         if let info = currentCallInfo, let remoteParty = info.remoteParty, let sig = signaling {
@@ -542,10 +536,10 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             callState = .ringing
 
             callKitManager?.reportIncomingCall(callerName: stream.alias ?? "Incoming Call") { [weak self] error in
-                if let error, let self {
-                    Task { @MainActor in
-                        self.callDelegate?.bandwidthRTC(self, callDidFailWithError: error, info: info)
-                    }
+                guard let self, let error else { return }
+                Task { @MainActor in
+                    self.callDelegate?.bandwidthRTC(self, callDidFailWithError: error, info: info)
+                    self.transitionToIdle()
                 }
             }
 
@@ -559,6 +553,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
         case .connecting:
             // Stream arrived after user answered or during outbound call — go active
+            stream.mediaStream.audioTracks.forEach { $0.isEnabled = true }
             callState = .active
             notifyCallStateChange(.active)
 
@@ -569,27 +564,17 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
     @MainActor
     private func handleStreamUnavailableForCallKit(_ streamId: String) {
-        if callState == .active {
-            callKitManager?.reportCallEnded(reason: .remoteEnded)
-            callKitManager?.deactivateAudioSessionForOutboundCall()
-            transitionToIdle()
-        }
+        guard callState != .idle else { return }
+        callKitManager?.reportCallEnded(reason: .remoteEnded)
+        transitionToIdle()
     }
 
     @MainActor
     private func handleRemoteDisconnectedForCallKit() {
-        switch callState {
-        case .ringing:
-            callKitManager?.reportCallEnded(reason: .remoteEnded)
-            pendingIncomingStream = nil
-            transitionToIdle()
-        case .connecting, .active:
-            callKitManager?.reportCallEnded(reason: .remoteEnded)
-            callKitManager?.deactivateAudioSessionForOutboundCall()
-            transitionToIdle()
-        case .idle, .ended:
-            break
-        }
+        guard callState != .idle else { return }
+        callKitManager?.reportCallEnded(reason: .remoteEnded)
+        pendingIncomingStream = nil
+        transitionToIdle()
     }
 
     @MainActor
