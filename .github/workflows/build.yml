@@ -15,7 +15,10 @@ jobs:
       - name: Select Xcode version
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: "16.2"
+          xcode-version: latest-stable
+
+      - name: Download iOS Simulator runtime
+        run: xcodebuild -downloadPlatform iOS
 
       - name: Extract version from tag
         id: version
@@ -25,7 +28,7 @@ jobs:
         run: |
           xcodebuild test \
             -scheme BandwidthRTC \
-            -destination "platform=iOS Simulator,name=iPhone 16" \
+            -destination "platform=iOS Simulator,name=iPhone 17" \
             -enableCodeCoverage YES
 
       - name: Build XCFramework
