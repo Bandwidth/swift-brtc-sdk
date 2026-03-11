@@ -1,6 +1,6 @@
 # Bandwidth RTC Swift
 
-Bandwidth RTC Swift is an iOS SDK for building real-time audio communication apps on the Bandwidth platform. Please refer to the (BandwidthRTC documentation)[https://dev.bandwidth.com/docs/voice/programmable-voice/bxml/connect] for learning more about the product.
+Bandwidth RTC Swift is an iOS SDK for building real-time audio communication apps on the Bandwidth platform. Please refer to the (BandwidthRTC documentation)[https://dev.bandwidth.com/docs/brtc/] for learning more about the product.
 
 ## Quick Start
 
