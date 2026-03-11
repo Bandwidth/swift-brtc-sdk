@@ -131,18 +131,19 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
 
     /// Wait for the publish peer connection's ICE to reach connected/completed.
     /// This ensures the server is ready to accept offerSdp after the initial handshake.
-    /// Throws `BandwidthRTCError.publishFailed` if ICE does not connect within the timeout.
-    func waitForPublishIceConnected(timeout: TimeInterval = 10) async throws {
+    /// Throws `BandwidthRTCError.publishFailed` if ICE does not connect within 10 seconds.
+    func waitForPublishIceConnected() async throws {
         if publishIceConnected {
             log.debug("Publish ICE already connected, skipping wait")
             return
         }
         // Poll until ICE is connected/completed — avoids a single stored continuation
         // being overwritten if multiple callers wait concurrently.
-        let deadline = Date().addingTimeInterval(timeout)
+        let timeoutSeconds: TimeInterval = 10
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
         while !publishIceConnected {
             if Date() >= deadline {
-                throw BandwidthRTCError.publishFailed("ICE connection timed out after \(Int(timeout))s")
+                throw BandwidthRTCError.publishFailed("ICE connection timed out after \(Int(timeoutSeconds))s")
             }
             try? await Task.sleep(nanoseconds: 50_000_000) // 50 ms
         }

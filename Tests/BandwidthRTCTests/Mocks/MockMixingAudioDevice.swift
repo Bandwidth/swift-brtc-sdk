@@ -160,17 +160,4 @@ final class MockMixingAudioDevice: NSObject, RTCAudioDevice, @unchecked Sendable
         return 480  // 10ms at 48kHz
     }
 
-    // MARK: - File audio simulation
-
-    func loadFile(url: URL) throws {
-        // Mock: no-op
-    }
-
-    func startFilePlayback() {
-        isPlayingFile = true
-    }
-
-    func stopFilePlayback() {
-        isPlayingFile = false
-    }
 }

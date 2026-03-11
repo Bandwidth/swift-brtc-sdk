@@ -282,23 +282,6 @@ final class BandwidthRTCTests: XCTestCase {
         }
     }
 
-    // MARK: - File Audio
-
-    func testPublishFileAudioThrowsIfNotConnected() async {
-        let sut = makeSUT()
-        let url = URL(fileURLWithPath: "/tmp/test.wav")
-        await XCTAssertThrowsErrorAsync(try await sut.publishFileAudio(url: url)) { error in
-            XCTAssertEqual(error as? BandwidthRTCError, .notConnected)
-        }
-    }
-
-    func testStopFileAudioClearsFlag() async throws {
-        let sut = makeSUT()
-        try await sut.connect(authParams: validAuthParams)
-        sut.stopFileAudio()
-        XCTAssertFalse(sut.isPlayingFileAudio)
-    }
-
     // MARK: - Media Control
 
     func testSetMicEnabledForwardsToPCManager() async throws {

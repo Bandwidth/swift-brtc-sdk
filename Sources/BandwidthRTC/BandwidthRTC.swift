@@ -182,6 +182,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     // MARK: - Private: Session Cleanup
 
     private func cleanupSession() async {
+        isConnected = false
         peerConnectionManager?.cleanup()
         peerConnectionManager = nil
         _ = mixingDevice?.terminateDevice()

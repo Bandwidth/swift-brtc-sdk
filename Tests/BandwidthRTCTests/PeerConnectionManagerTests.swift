@@ -117,9 +117,9 @@ final class PeerConnectionManagerTests: XCTestCase {
 
     // MARK: - Stale SDP Offer
 
-    func testStaleOfferRejected() async {
+    func testStaleOfferRejected() async throws {
         // Set revision to 5
-        sut.setupSubscribingPeerConnection()
+        try sut.setupSubscribingPeerConnection()
         // Force subscribeSdpRevision to 5 by calling through the public path (or directly)
         // We can't set it directly (it's private(set)), so we test via the public interface
         // by first accepting revision 1 would fail SDP, so we test the rejection path directly.
