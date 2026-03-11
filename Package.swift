@@ -5,7 +5,7 @@ let package = Package(
     name: "BandwidthRTC",
     platforms: [.iOS(.v17)],
     products: [
-        .library(name: "BandwidthRTC", targets: ["BandwidthRTC"]),
+        .library(name: "BandwidthRTC", type: .dynamic, targets: ["BandwidthRTC"]),
     ],
     dependencies: [
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "114.0.0"),
