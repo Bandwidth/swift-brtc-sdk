@@ -263,14 +263,13 @@ final class SignalingClientTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
         connectTask.cancel()
 
-        var closeFired = false
-        await sut.onEvent("close") { _ in closeFired = true }
+        let closeExpectation = expectation(description: "close event fired")
+        await sut.onEvent("close") { _ in closeExpectation.fulfill() }
 
         // Inject a receive error to simulate WebSocket drop
         mockWS.enqueueError(URLError(.networkConnectionLost))
-        try await Task.sleep(for: .milliseconds(100))
+        await fulfillment(of: [closeExpectation], timeout: 2.0)
 
-        XCTAssertTrue(closeFired)
         let connected = await sut.isConnected
         XCTAssertFalse(connected)
     }
