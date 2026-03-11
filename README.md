@@ -39,6 +39,30 @@ class CallService {
 
 A number of samples using Bandwidth WebRTC Swift may be found within [Bandwidth-Samples](https://github.com/Bandwidth-Samples).
 
+
 ## Compatibility
 
 Bandwidth WebRTC Swift follows [SemVer 2.0.0](https://semver.org/#semantic-versioning-200).
+
+
+## For Developers
+
+### Running Unit Tests
+
+#### In Xcode
+
+1. Open the package in Xcode:
+   ```
+   open Package.swift
+   ```
+2. Select the **BandwidthRTC** scheme from the scheme picker in the toolbar.
+3. Choose an iOS Simulator as the run destination (e.g. **iPhone 17 Pro**).
+4. Press **⌘U** (or go to **Product → Test**).
+
+#### From the command line
+
+```bash
+xcodebuild test \
+  -scheme BandwidthRTC \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro'
+```
