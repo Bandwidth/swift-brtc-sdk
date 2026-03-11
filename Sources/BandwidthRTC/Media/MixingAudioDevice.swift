@@ -12,13 +12,14 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     // MARK: - Constants
 
-    private static let sampleRate: Double = 48000
+    private static let sampleRate: Double = 48000 // WebRTC's fixed sample rate for Opus at 48kHz frame sizes
     private static let audioFormat = AVAudioFormat(
         commonFormat: .pcmFormatFloat32,
         sampleRate: sampleRate,
         channels: 1,
         interleaved: false
     )!
+
     /// Precomputed reciprocal so the render callback does a multiply instead of a divide.
     private static let int16ToFloat: Float32 = 1.0 / Float32(Int16.max)
 
@@ -196,10 +197,22 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     private func handleEngineConfigurationChange() {
         log.warn("[BRTC] AVAudioEngineConfigurationChange — restarting engine")
         engine.stop()
+        // Remove stale taps before restarting to avoid double-tap overload
+        engine.inputNode.removeTap(onBus: 0)
+        engine.mainMixerNode.removeTap(onBus: 0)
+        // Reattach source node and reconfig converters since the hardware format may have changed
+        if let node = sourceNode {
+            engine.detach(node)
+            sourceNode = nil
+        }
+        micConverter = nil
+        micConversionBuf = nil
+        setupSourceNode()
         startEngineIfNeeded()
+        if isRecording {
+            installMicTap()
+        }
         if isPlaying {
-            // Remove the stale tap before reinstalling to avoid double-tap overload
-            engine.mainMixerNode.removeTap(onBus: 0)
             installPlayoutTap()
         }
     }

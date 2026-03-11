@@ -336,6 +336,11 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         await signaling.onEvent("close") { [weak self] _ in
             Logger.shared.warn("WebSocket closed")
             self?.isConnected = false
+            // Nil out the peer connection manager so a subsequent connect() call
+            // creates a fresh one rather than reusing stale peer connections.
+            self?.peerConnectionManager?.cleanup()
+            self?.peerConnectionManager = nil
+            self?.mixingDevice = nil
         }
     }
 

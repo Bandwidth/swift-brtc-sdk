@@ -80,17 +80,19 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     // MARK: - Peer Connection Setup
 
     @discardableResult
-    func setupPublishingPeerConnection() -> RTCPeerConnection {
+    func setupPublishingPeerConnection() throws -> RTCPeerConnection {
         let constraints = RTCMediaConstraints(
             mandatoryConstraints: nil,
             optionalConstraints: nil
         )
 
-        let pc = factory.peerConnection(
+        guard let pc = factory.peerConnection(
             with: rtcConfiguration,
             constraints: constraints,
             delegate: self
-        )!
+        ) else {
+            throw BandwidthRTCError.connectionFailed("Failed to create publishing peer connection")
+        }
 
         // Don't pre-create data channels — all data channels (__heartbeat__, __diagnostics__)
         // are created by the server in-band via the SDP and received via
@@ -102,17 +104,19 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
-    func setupSubscribingPeerConnection() -> RTCPeerConnection {
+    func setupSubscribingPeerConnection() throws -> RTCPeerConnection {
         let constraints = RTCMediaConstraints(
             mandatoryConstraints: nil,
             optionalConstraints: nil
         )
 
-        let pc = factory.peerConnection(
+        guard let pc = factory.peerConnection(
             with: rtcConfiguration,
             constraints: constraints,
             delegate: self
-        )!
+        ) else {
+            throw BandwidthRTCError.connectionFailed("Failed to create subscribing peer connection")
+        }
 
         // Don't pre-create data channels on the subscribe PC.
         // The server's SDP includes an m=application section that handles
@@ -127,14 +131,19 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
 
     /// Wait for the publish peer connection's ICE to reach connected/completed.
     /// This ensures the server is ready to accept offerSdp after the initial handshake.
-    func waitForPublishIceConnected() async {
+    /// Throws `BandwidthRTCError.publishFailed` if ICE does not connect within the timeout.
+    func waitForPublishIceConnected(timeout: TimeInterval = 10) async throws {
         if publishIceConnected {
             log.debug("Publish ICE already connected, skipping wait")
             return
         }
         // Poll until ICE is connected/completed — avoids a single stored continuation
         // being overwritten if multiple callers wait concurrently.
+        let deadline = Date().addingTimeInterval(timeout)
         while !publishIceConnected {
+            if Date() >= deadline {
+                throw BandwidthRTCError.publishFailed("ICE connection timed out after \(Int(timeout))s")
+            }
             try? await Task.sleep(nanoseconds: 50_000_000) // 50 ms
         }
     }
