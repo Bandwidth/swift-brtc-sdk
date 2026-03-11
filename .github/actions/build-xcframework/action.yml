@@ -76,10 +76,23 @@ runs:
           MARKETING_VERSION="${MARKETING_VERSION}" \
           OTHER_SWIFT_FLAGS="-Xfrontend -no-verify-emitted-module-interface"
 
+        # Locate the framework bundles (path varies by machine/Swift Package layout)
+        IOS_FRAMEWORK=$(find build/ios.xcarchive -name "BandwidthRTC.framework" -type d | head -n 1)
+        IOS_SIM_FRAMEWORK=$(find build/ios-sim.xcarchive -name "BandwidthRTC.framework" -type d | head -n 1)
+
+        if [ -z "$IOS_FRAMEWORK" ] || [ -z "$IOS_SIM_FRAMEWORK" ]; then
+          echo "Error: could not locate BandwidthRTC.framework in xcarchive" >&2
+          find build/ -name "*.framework" -type d >&2
+          exit 1
+        fi
+
+        echo "iOS framework:     $IOS_FRAMEWORK"
+        echo "Simulator framework: $IOS_SIM_FRAMEWORK"
+
         # Combine into XCFramework
         xcodebuild -create-xcframework \
-          -framework build/ios.xcarchive/Products/Library/Frameworks/BandwidthRTC.framework \
-          -framework build/ios-sim.xcarchive/Products/Library/Frameworks/BandwidthRTC.framework \
+          -framework "$IOS_FRAMEWORK" \
+          -framework "$IOS_SIM_FRAMEWORK" \
           -output BandwidthRTC.xcframework
 
         # Zip for distribution
