@@ -15,17 +15,18 @@ jobs:
       - name: Select Xcode version
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest-stable
+          xcode-version: "16.2"
 
       - name: Extract version from tag
         id: version
         run: echo "VERSION=build-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
 
       - name: Run unit tests
-        run: xcodebuild test \
-          -scheme BandwidthRTC \
-          -destination "platform=iOS Simulator,name=iPhone 16" \
-          -enableCodeCoverage YES
+        run: |
+          xcodebuild test \
+            -scheme BandwidthRTC \
+            -destination "platform=iOS Simulator,name=iPhone 16" \
+            -enableCodeCoverage YES
 
       - name: Build XCFramework
         env:
