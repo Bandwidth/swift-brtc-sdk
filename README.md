@@ -8,29 +8,29 @@ Bandwidth RTC Swift is an iOS SDK for building real-time audio communication app
 import BandwidthRTC
 
 class CallService {
-    let brtc = BandwidthRTC()
+    let brtcClient = BandwidthRTCClient()
 
     func startCall(token: String) async throws {
-        brtc.onStreamAvailable = { stream in
+        brtcClient.onStreamAvailable = { stream in
             // Handle incoming remote audio stream
             print("Remote stream available: \(stream.streamId)")
         }
 
-        brtc.onStreamUnavailable = { streamId in
+        brtcClient.onStreamUnavailable = { streamId in
             print("Remote stream removed: \(streamId)")
         }
 
-        brtc.onReady = { metadata in
+        brtcClient.onReady = { metadata in
             print("Connected — endpointId: \(metadata.endpointId ?? "unknown")")
         }
 
-        try await brtc.connect(authParams: RtcAuthParams(endpointToken: token))
-        let localStream = try await brtc.publish(audio: true)
+        try await brtcClient.connect(authParams: RtcAuthParams(endpointToken: token))
+        let localStream = try await brtcClient.publish(audio: true)
         print("Publishing local audio: \(localStream.streamId)")
     }
 
     func endCall() {
-        brtc.disconnect()
+        brtcClient.disconnect()
     }
 }
 ```
