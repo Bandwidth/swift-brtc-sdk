@@ -8,11 +8,11 @@ protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
     var onSubscribingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)? { get set }
 
     @discardableResult
-    func setupPublishingPeerConnection() -> RTCPeerConnection
+    func setupPublishingPeerConnection() throws -> RTCPeerConnection
     @discardableResult
-    func setupSubscribingPeerConnection() -> RTCPeerConnection
+    func setupSubscribingPeerConnection() throws -> RTCPeerConnection
 
-    func waitForPublishIceConnected() async
+    func waitForPublishIceConnected() async throws
     func answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType) async throws -> String
     func addLocalTracks(audio: Bool) -> RTCMediaStream
     func removeLocalTracks(streamId: String)

@@ -22,14 +22,14 @@ final class PeerConnectionManagerTests: XCTestCase {
 
     // MARK: - Setup
 
-    func testSetupPublishingPCCreatesPC() {
-        let pc = sut.setupPublishingPeerConnection()
+    func testSetupPublishingPCCreatesPC() throws {
+        let pc = try sut.setupPublishingPeerConnection()
         XCTAssertNotNil(pc)
         XCTAssertNotNil(sut.publishingPC)
     }
 
-    func testSetupSubscribingPCCreatesPC() {
-        let pc = sut.setupSubscribingPeerConnection()
+    func testSetupSubscribingPCCreatesPC() throws {
+        let pc = try sut.setupSubscribingPeerConnection()
         XCTAssertNotNil(pc)
         XCTAssertNotNil(sut.subscribingPC)
     }
@@ -48,14 +48,14 @@ final class PeerConnectionManagerTests: XCTestCase {
 
     // MARK: - ICE State
 
-    func testWaitForPublishIceConnectedResolvesImmediately() async {
+    func testWaitForPublishIceConnectedResolvesImmediately() async throws {
         // Force publishIceConnected to true via setValue
-        sut.setupPublishingPeerConnection()
+        try sut.setupPublishingPeerConnection()
         // Simulate connected state by firing the delegate
         sut.peerConnection(sut.publishingPC!, didChange: .connected)
 
         // Should return immediately without suspending
-        await sut.waitForPublishIceConnected()
+        try await sut.waitForPublishIceConnected()
         XCTAssertTrue(sut.publishIceConnected)
     }
 
@@ -139,8 +139,8 @@ final class PeerConnectionManagerTests: XCTestCase {
 
     // MARK: - Media Control
 
-    func testSetAudioEnabledDisablesAllTracks() {
-        sut.setupPublishingPeerConnection()
+    func testSetAudioEnabledDisablesAllTracks() throws {
+        try sut.setupPublishingPeerConnection()
         // Add local tracks to have something to disable
         let stream = sut.addLocalTracks(audio: true)
         sut.setAudioEnabled(false)
@@ -149,8 +149,8 @@ final class PeerConnectionManagerTests: XCTestCase {
         }
     }
 
-    func testSetAudioEnabledEnablesAllTracks() {
-        sut.setupPublishingPeerConnection()
+    func testSetAudioEnabledEnablesAllTracks() throws {
+        try sut.setupPublishingPeerConnection()
         let stream = sut.addLocalTracks(audio: true)
         sut.setAudioEnabled(false)
         sut.setAudioEnabled(true)
@@ -166,17 +166,17 @@ final class PeerConnectionManagerTests: XCTestCase {
         sut.sendDtmf("1")
     }
 
-    func testSendDtmfWithNoAudioSender() {
-        sut.setupPublishingPeerConnection()
+    func testSendDtmfWithNoAudioSender() throws {
+        try sut.setupPublishingPeerConnection()
         // No audio senders attached — should not crash
         sut.sendDtmf("2")
     }
 
     // MARK: - Cleanup
 
-    func testCleanupNilsAllPCs() {
-        sut.setupPublishingPeerConnection()
-        sut.setupSubscribingPeerConnection()
+    func testCleanupNilsAllPCs() throws {
+        try sut.setupPublishingPeerConnection()
+        try sut.setupSubscribingPeerConnection()
         sut.cleanup()
         XCTAssertNil(sut.publishingPC)
         XCTAssertNil(sut.subscribingPC)
@@ -189,8 +189,8 @@ final class PeerConnectionManagerTests: XCTestCase {
 
     // MARK: - Delegate Callbacks
 
-    func testStreamAddedCallsOnStreamAvailable() {
-        sut.setupSubscribingPeerConnection()
+    func testStreamAddedCallsOnStreamAvailable() throws {
+        try sut.setupSubscribingPeerConnection()
         var callbackFired = false
         sut.onStreamAvailable = { _, _ in callbackFired = true }
 
@@ -205,8 +205,8 @@ final class PeerConnectionManagerTests: XCTestCase {
         XCTAssertTrue(callbackFired)
     }
 
-    func testStreamRemovedCallsOnStreamUnavailable() {
-        sut.setupSubscribingPeerConnection()
+    func testStreamRemovedCallsOnStreamUnavailable() throws {
+        try sut.setupSubscribingPeerConnection()
         var removedStreamId: String?
         sut.onStreamUnavailable = { id in removedStreamId = id }
 
@@ -221,8 +221,8 @@ final class PeerConnectionManagerTests: XCTestCase {
         XCTAssertEqual(removedStreamId, "removed-stream")
     }
 
-    func testSubscribingICEDisconnectedForwardedToCallback() {
-        sut.setupSubscribingPeerConnection()
+    func testSubscribingICEDisconnectedForwardedToCallback() throws {
+        try sut.setupSubscribingPeerConnection()
         var capturedState: RTCIceConnectionState?
         sut.onSubscribingIceConnectionStateChange = { state in capturedState = state }
 
@@ -230,13 +230,13 @@ final class PeerConnectionManagerTests: XCTestCase {
         XCTAssertEqual(capturedState, .disconnected)
     }
 
-    func testPublishIceContinuationResumedOnConnected() async {
-        sut.setupPublishingPeerConnection()
+    func testPublishIceContinuationResumedOnConnected() async throws {
+        try sut.setupPublishingPeerConnection()
         XCTAssertFalse(sut.publishIceConnected)
 
         // Fire delegate callback to simulate ICE connected
         let task = Task {
-            await self.sut.waitForPublishIceConnected()
+            try? await self.sut.waitForPublishIceConnected()
         }
         // Give the task time to suspend
         try? await Task.sleep(for: .milliseconds(20))
@@ -250,8 +250,8 @@ final class PeerConnectionManagerTests: XCTestCase {
 
     // MARK: - Heartbeat Data Channel
 
-    func testHeartbeatPingRespondsWithPong() {
-        sut.setupPublishingPeerConnection()
+    func testHeartbeatPingRespondsWithPong() throws {
+        try sut.setupPublishingPeerConnection()
         // We can't easily mock RTCDataChannel, so we just verify no crash
         // when the heartbeat message handler logic is tested via the delegate
         // (full integration test requires a real peer connection with data channel)

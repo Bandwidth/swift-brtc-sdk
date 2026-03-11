@@ -40,17 +40,17 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     // MARK: - PeerConnectionManagerProtocol
 
     @discardableResult
-    func setupPublishingPeerConnection() -> RTCPeerConnection {
+    func setupPublishingPeerConnection() throws -> RTCPeerConnection {
         // Not expected to be called when mock is injected before connect()
         fatalError("setupPublishingPeerConnection called on mock — inject mock before connect()")
     }
 
     @discardableResult
-    func setupSubscribingPeerConnection() -> RTCPeerConnection {
+    func setupSubscribingPeerConnection() throws -> RTCPeerConnection {
         fatalError("setupSubscribingPeerConnection called on mock — inject mock before connect()")
     }
 
-    func waitForPublishIceConnected() async {
+    func waitForPublishIceConnected() async throws {
         waitForPublishIceConnectedCallCount += 1
     }
 

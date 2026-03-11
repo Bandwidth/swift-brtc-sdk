@@ -121,8 +121,8 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             // Set up peer connections with the custom ADM
             let newPCMgr = PeerConnectionManager(options: options, audioDevice: mixing)
             self.peerConnectionManager = newPCMgr
-            newPCMgr.setupPublishingPeerConnection()
-            newPCMgr.setupSubscribingPeerConnection()
+            try newPCMgr.setupPublishingPeerConnection()
+            try newPCMgr.setupSubscribingPeerConnection()
             pcMgr = newPCMgr
         }
 
@@ -203,7 +203,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         //    The server rejects offerSdp with "peer not ready" if the initial
         //    handshake hasn't finished.
         Logger.shared.debug("Waiting for publish PC ICE to connect...")
-        await pcManager.waitForPublishIceConnected()
+        try await pcManager.waitForPublishIceConnected()
         Logger.shared.debug("Publish PC ICE connected — proceeding with publish")
 
         // 2. Add local audio track to the publishing peer connection
