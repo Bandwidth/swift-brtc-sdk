@@ -97,7 +97,7 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
         self.delegate = delegate
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth])
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
             try session.setActive(true)
         } catch {
             log.error("AVAudioSession config failed: \(error)")
