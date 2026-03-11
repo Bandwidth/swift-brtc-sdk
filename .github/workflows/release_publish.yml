@@ -33,6 +33,9 @@ jobs:
             -archivePath build/ios.xcarchive \
             SKIP_INSTALL=NO \
             BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            INSTALL_PATH='/Library/Frameworks' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
             MARKETING_VERSION="${VERSION}" \
             OTHER_SWIFT_FLAGS="-Xfrontend -no-verify-emitted-module-interface"
 
@@ -43,6 +46,9 @@ jobs:
             -archivePath build/ios-sim.xcarchive \
             SKIP_INSTALL=NO \
             BUILD_LIBRARY_FOR_DISTRIBUTION=YES \
+            INSTALL_PATH='/Library/Frameworks' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
             MARKETING_VERSION="${VERSION}" \
             OTHER_SWIFT_FLAGS="-Xfrontend -no-verify-emitted-module-interface"
 
