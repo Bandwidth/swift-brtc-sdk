@@ -31,7 +31,6 @@ Tests/BandwidthRTCTests/
 │   └── release_publish.yml         # Runs when release is published; builds + attaches XCFramework
 └── actions/build-xcframework/       # Composite action: Xcode setup → archive → zip
 
-docs/versioning.md                   # Full versioning system explanation
 VERSION                              # Single source of truth for the SDK version (e.g. 1.0.1)
 ```
 
@@ -75,17 +74,16 @@ Tests live in `Tests/BandwidthRTCTests/`. Pass mocks into `BandwidthRTCClient` i
 
 **The `VERSION` file is the single source of truth.** No hardcoded version strings anywhere.
 
+> ⚠️ **Every PR must bump `VERSION`.** CI (`build.yml`) checks that the version on the branch is strictly greater than `origin/main` and **will fail** if it is not. Increment patch for bug fixes, minor for new features, major for breaking changes.
+
 - `VERSION` contains a plain semver string (e.g. `1.0.1`)
 - The `GenerateSDKVersion` build plugin reads `VERSION` at build time and generates `SDKVersion+Generated.swift` — this is how `SDKVersion.current` gets its value for both local and CI builds
-- **Every PR must bump `VERSION` manually** — `build.yml` will fail with the expected next version if it's not bumped
 - Do **not** add a committed `SDKVersion.swift` to Sources — the plugin generates that symbol into its work directory
 
 ### Flow
 ```
 Bump VERSION in PR → CI enforces it's higher than main → merge → draft release created automatically → publish release → XCFramework built and attached
 ```
-
-See `docs/versioning.md` for full details.
 
 ---
 

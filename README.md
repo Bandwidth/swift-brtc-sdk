@@ -1,6 +1,41 @@
-# Bandwidth RTC Swift
+# Bandwidth RTC Swift SDK
 
-Bandwidth RTC Swift is an iOS SDK for building real-time audio communication apps on the Bandwidth platform. Please refer to the (BandwidthRTC documentation)[https://dev.bandwidth.com/docs/brtc/] for learning more about the product.
+An iOS SDK for building real-time audio communication apps on the [Bandwidth](https://www.bandwidth.com) platform. Wraps WebRTC and connects to the Bandwidth BRTC gateway over a JSON-RPC 2.0 WebSocket signaling channel. Distributed as a signed XCFramework via Swift Package Manager.
+
+For product documentation, see the [Bandwidth RTC developer docs](https://dev.bandwidth.com/docs/brtc/).
+
+---
+
+## Requirements
+
+- iOS 17+
+- Swift 5.9+
+- Xcode 16+
+- Swift Package Manager
+
+---
+
+## Installation
+
+### Swift Package Manager
+
+In Xcode, go to **File → Add Package Dependencies** and enter the repository URL. Or add it directly to your `Package.swift`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/Bandwidth/swift-brtc-sdk", from: "1.0.0"),
+],
+targets: [
+    .target(
+        name: "YourApp",
+        dependencies: [
+            .product(name: "BandwidthRTC", package: "swift-brtc-sdk")
+        ]
+    ),
+]
+```
+
+---
 
 ## Quick Start
 
@@ -8,56 +43,87 @@ Bandwidth RTC Swift is an iOS SDK for building real-time audio communication app
 import BandwidthRTC
 
 class CallService {
-    let brtcClient = BandwidthRTCClient()
+    let client = BandwidthRTCClient()
 
     func startCall(token: String) async throws {
-        brtcClient.onStreamAvailable = { stream in
-            // Handle incoming remote audio stream
+        // Called when a remote participant starts streaming
+        client.onStreamAvailable = { stream in
             print("Remote stream available: \(stream.streamId)")
         }
 
-        brtcClient.onStreamUnavailable = { streamId in
+        // Called when a remote participant stops streaming
+        client.onStreamUnavailable = { streamId in
             print("Remote stream removed: \(streamId)")
         }
 
-        brtcClient.onReady = { metadata in
+        // Called once the gateway signals readiness
+        client.onReady = { metadata in
             print("Connected — endpointId: \(metadata.endpointId ?? "unknown")")
         }
 
-        try await brtcClient.connect(authParams: RtcAuthParams(endpointToken: token))
-        let localStream = try await brtcClient.publish(audio: true)
+        // Called if the WebSocket drops unexpectedly
+        client.onDisconnected = {
+            print("Disconnected from gateway")
+        }
+
+        // Connect and publish local microphone audio
+        try await client.connect(authParams: RtcAuthParams(endpointToken: token))
+        let localStream = try await client.publish(audio: true)
         print("Publishing local audio: \(localStream.streamId)")
     }
 
     func endCall() {
-        brtcClient.disconnect()
+        client.disconnect()
     }
 }
 ```
 
+---
+
+## Callbacks
+
+| Property | When it fires |
+|---|---|
+| `onReady` | Gateway signals the endpoint is ready to receive calls |
+| `onStreamAvailable` | A remote participant begins streaming audio |
+| `onStreamUnavailable` | A remote participant stops streaming |
+| `onDisconnected` | WebSocket connection dropped unexpectedly |
+| `onLocalAudioLevel` | Per-chunk Float32 mic samples (for visualization) |
+| `onRemoteAudioLevel` | Per-chunk Float32 remote playout samples (for visualization) |
+
+---
+
 ## Samples
 
-A number of samples using Bandwidth WebRTC Swift may be found within [Bandwidth-Samples](https://github.com/Bandwidth-Samples).
+Sample apps can be found in [Bandwidth-Samples](https://github.com/Bandwidth-Samples).
 
+---
 
 ## Compatibility
 
-Bandwidth WebRTC Swift follows [SemVer 2.0.0](https://semver.org/#semantic-versioning-200).
+This SDK follows [SemVer 2.0.0](https://semver.org/#semantic-versioning-200).
 
+---
 
-## For Developers
+## Contributing
+
+> **Every PR must bump the `VERSION` file.** CI will fail if you don't.
+
+1. Make your changes.
+2. Open `VERSION` at the repo root and increment the version (e.g. `1.0.1` → `1.0.2`). Use patch for bug fixes, minor for new features, major for breaking changes.
+3. Open your PR — `build.yml` enforces that the new version is strictly greater than `main`.
 
 ### Running Unit Tests
 
 #### In Xcode
 
-1. Open the package in Xcode:
+1. Open the package:
    ```
    open Package.swift
    ```
-2. Select the **BandwidthRTC** scheme from the scheme picker in the toolbar.
-3. Choose an iOS Simulator as the run destination (e.g. **iPhone 17 Pro**).
-4. Press **⌘U** (or go to **Product → Test**).
+2. Select the **BandwidthRTC** scheme.
+3. Choose an iOS Simulator destination (e.g. **iPhone 17 Pro**).
+4. Press **⌘U**.
 
 #### From the command line
 
