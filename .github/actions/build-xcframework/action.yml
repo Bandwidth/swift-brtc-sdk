@@ -24,15 +24,7 @@ runs:
       with:
         xcode-version: latest-stable
 
-    - name: Cache iOS Simulator runtime
-      id: cache-simulator
-      uses: actions/cache@v4
-      with:
-        path: ~/Library/Developer/CoreSimulator/Profiles/Runtimes
-        key: ios-simulator-${{ steps.xcode.outputs.selected-xcode-version }}
-
     - name: Download iOS Simulator runtime
-      if: steps.cache-simulator.outputs.cache-hit != 'true'
       shell: bash
       run: xcodebuild -downloadPlatform iOS
 
