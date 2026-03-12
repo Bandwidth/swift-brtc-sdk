@@ -4,7 +4,6 @@ import Foundation
 private let defaultGatewayURL = "wss://gateway.pv.prod.global.aws.bandwidth.com/prod/gateway-service/api/v1/endpoints"
 
 /// SDK version reported to the gateway.
-/// Generated at build time by the GenerateSDKVersion plugin from `MARKETING_VERSION`.
 private let sdkVersion = SDKVersion.current
 
 /// Ping interval in seconds.
