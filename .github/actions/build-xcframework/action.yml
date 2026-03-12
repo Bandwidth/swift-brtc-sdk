@@ -36,14 +36,6 @@ runs:
       shell: bash
       run: xcodebuild -downloadPlatform iOS
 
-    - name: Generate SDKVersion.swift
-      shell: bash
-      env:
-        MARKETING_VERSION: ${{ inputs.marketing_version }}
-      run: |
-        printf 'enum SDKVersion {\n    static let current = "%s-ios"\n}\n' \
-          "${MARKETING_VERSION}" > Sources/BandwidthRTC/SDKVersion.swift
-
     - name: Run unit tests
       if: inputs.run_tests == 'true'
       shell: bash

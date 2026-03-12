@@ -11,9 +11,14 @@ let package = Package(
         .package(url: "https://github.com/stasel/WebRTC.git", exact: "114.0.0"),
     ],
     targets: [
+        .plugin(
+            name: "GenerateSDKVersion",
+            capability: .buildTool()
+        ),
         .target(
             name: "BandwidthRTC",
-            dependencies: [.product(name: "WebRTC", package: "WebRTC")]
+            dependencies: [.product(name: "WebRTC", package: "WebRTC")],
+            plugins: ["GenerateSDKVersion"]
         ),
         .testTarget(
             name: "BandwidthRTCTests",
