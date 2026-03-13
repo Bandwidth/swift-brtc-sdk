@@ -113,7 +113,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             }
 
             // Create the custom ADM — it owns audio session config, mic capture, and playout
-            let mixing = MixingAudioDevice()
+            let mixing = MixingAudioDevice(audioOptions: options?.audioProcessing ?? AudioProcessingOptions())
             mixing.onLocalAudioLevel = { [weak self] samples in self?.onLocalAudioLevel?(samples) }
             mixing.onRemoteAudioLevel = { [weak self] samples in self?.onRemoteAudioLevel?(samples) }
             self.mixingDevice = mixing

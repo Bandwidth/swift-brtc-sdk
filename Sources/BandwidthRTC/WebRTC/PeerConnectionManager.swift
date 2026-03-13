@@ -145,7 +145,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             if Date() >= deadline {
                 throw BandwidthRTCError.publishFailed("ICE connection timed out after \(Int(timeoutSeconds))s")
             }
-            try? await Task.sleep(nanoseconds: 50_000_000) // 50 ms
+            try? await Task.sleep(for: .milliseconds(50))
         }
     }
 

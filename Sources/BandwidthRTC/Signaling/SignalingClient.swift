@@ -330,7 +330,7 @@ actor SignalingClient {
     private func startPingLoop() {
         pingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(pingInterval))
+                try? await Task.sleep(nanoseconds: UInt64(pingInterval * 1_000_000_000))
                 guard !Task.isCancelled, let self else { break }
                 await self.sendPing()
             }

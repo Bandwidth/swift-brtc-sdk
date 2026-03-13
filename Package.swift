@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "BandwidthRTC",
-    platforms: [.iOS(.v17)],
+    platforms: [.iOS(.v16)],
     products: [
         .library(name: "BandwidthRTC", type: .dynamic, targets: ["BandwidthRTC"]),
     ],

@@ -10,15 +10,9 @@ import WebRTC
 ///   - AVAudioSourceNode render callback pulls Int16 PCM from WebRTC via getPlayoutData, converts to Float32
 public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
-    // MARK: - Constants
+    // MARK: - Configuration
 
-    private static let sampleRate: Double = 48000 // WebRTC's fixed sample rate for Opus at 48kHz frame sizes
-    private static let audioFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: sampleRate,
-        channels: 1,
-        interleaved: false
-    )!
+    private let audioOptions: AudioProcessingOptions
 
     /// Precomputed reciprocal so the render callback does a multiply instead of a divide.
     private static let int16ToFloat: Float32 = 1.0 / Float32(Int16.max)
@@ -34,13 +28,14 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     // MARK: - AVAudioEngine
 
-    private let engine = AVAudioEngine()
-    private var sourceNode: AVAudioSourceNode?
+    public private(set) var engine = AVAudioEngine()
+    public private(set) var sourceNode: AVAudioSourceNode?
     private var micConverter: AVAudioConverter?
 
     // MARK: - Init
 
-    public override init() {
+    public init(audioOptions: AudioProcessingOptions = AudioProcessingOptions()) {
+        self.audioOptions = audioOptions
         super.init()
     }
 
@@ -81,14 +76,14 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     // MARK: - RTCAudioDevice: Format
 
-    public var deviceInputSampleRate: Double { Self.sampleRate }
-    public var inputIOBufferDuration: TimeInterval { 0.01 }
-    public var inputNumberOfChannels: Int { 1 }
+    public var deviceInputSampleRate: Double { audioOptions.inputSampleRate }
+    public var inputIOBufferDuration: TimeInterval { audioOptions.preferredIOBufferDuration ?? (audioOptions.useLowLatency ? 0.005 : 0.01) }
+    public var inputNumberOfChannels: Int { audioOptions.inputChannels }
     public var inputLatency: TimeInterval { AVAudioSession.sharedInstance().inputLatency }
 
-    public var deviceOutputSampleRate: Double { Self.sampleRate }
-    public var outputIOBufferDuration: TimeInterval { 0.01 }
-    public var outputNumberOfChannels: Int { 1 }
+    public var deviceOutputSampleRate: Double { audioOptions.outputSampleRate }
+    public var outputIOBufferDuration: TimeInterval { audioOptions.preferredIOBufferDuration ?? (audioOptions.useLowLatency ? 0.005 : 0.01) }
+    public var outputNumberOfChannels: Int { audioOptions.outputChannels }
     public var outputLatency: TimeInterval { AVAudioSession.sharedInstance().outputLatency }
 
     // MARK: - RTCAudioDevice: Lifecycle
@@ -97,7 +92,9 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
         self.delegate = delegate
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP])
+            try session.setCategory(.playAndRecord, mode: audioOptions.audioSessionMode, options: audioOptions.audioSessionCategoryOptions)
+            let ioDuration = audioOptions.preferredIOBufferDuration ?? (audioOptions.useLowLatency ? 0.005 : 0.01)
+            try session.setPreferredIOBufferDuration(ioDuration)
             try session.setActive(true)
         } catch {
             log.error("AVAudioSession config failed: \(error)")
@@ -218,7 +215,12 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     }
 
     private func setupSourceNode() {
-        let format = Self.audioFormat
+        let format = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: audioOptions.outputSampleRate,
+            channels: AVAudioChannelCount(audioOptions.outputChannels),
+            interleaved: false
+        )!
 
         let node = AVAudioSourceNode(format: format) { [weak self] _, _, frameCount, audioBufferList in
             guard let self, let delegate = self.delegate else {
@@ -303,13 +305,18 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     private func installMicTap() {
         let inputNode = engine.inputNode
         let nativeFormat = inputNode.outputFormat(forBus: 0)
-        let targetFormat = Self.audioFormat
+        let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: audioOptions.inputSampleRate,
+            channels: AVAudioChannelCount(audioOptions.inputChannels),
+            interleaved: false
+        )!
 
-        if nativeFormat.sampleRate != Self.sampleRate || nativeFormat.channelCount != 1 {
+        if nativeFormat.sampleRate != audioOptions.inputSampleRate || nativeFormat.channelCount != AVAudioChannelCount(audioOptions.inputChannels) {
             micConverter = AVAudioConverter(from: nativeFormat, to: targetFormat)
             // Pre-allocate the output buffer for conversion — avoids per-callback heap allocation.
             // Use 4× the tap bufferSize as capacity to absorb any engine-side buffer variance.
-            let ratio = Self.sampleRate / nativeFormat.sampleRate
+            let ratio = audioOptions.inputSampleRate / nativeFormat.sampleRate
             let capacity = AVAudioFrameCount(Double(4096) * ratio) + 1
             micConversionBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: capacity)
         }

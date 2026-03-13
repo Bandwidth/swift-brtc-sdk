@@ -12,13 +12,18 @@ public struct RtcOptions: Sendable {
     /// ICE transport policy. Defaults to `.all`.
     public var iceTransportPolicy: RTCIceTransportPolicy?
 
+    /// Audio processing and format options. Defaults to SDK defaults (48 kHz, mono, voiceChat mode).
+    public var audioProcessing: AudioProcessingOptions
+
     public init(
         websocketUrl: String? = nil,
         iceServers: [RTCIceServer]? = nil,
-        iceTransportPolicy: RTCIceTransportPolicy? = nil
+        iceTransportPolicy: RTCIceTransportPolicy? = nil,
+        audioProcessing: AudioProcessingOptions = AudioProcessingOptions()
     ) {
         self.websocketUrl = websocketUrl
         self.iceServers = iceServers
         self.iceTransportPolicy = iceTransportPolicy
+        self.audioProcessing = audioProcessing
     }
 }
