@@ -25,6 +25,6 @@ jobs:
         run: |
           gh release create "v${{ steps.version.outputs.VERSION }}" \
             --draft \
-            --title "${{ steps.version.outputs.VERSION }}" \
+            --title "v${{ steps.version.outputs.VERSION }}" \
             --notes "## Changes" \
             --repo "${{ github.repository }}"
