@@ -1,0 +1,28 @@
+// swift-tools-version:5.9
+import PackageDescription
+
+let package = Package(
+    name: "BandwidthRTC",
+    platforms: [.iOS(.v16)],
+    products: [
+        .library(name: "BandwidthRTC", type: .dynamic, targets: ["BandwidthRTC"]),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/stasel/WebRTC.git", exact: "114.0.0"),
+    ],
+    targets: [
+        .plugin(
+            name: "GenerateSDKVersion",
+            capability: .buildTool()
+        ),
+        .target(
+            name: "BandwidthRTC",
+            dependencies: [.product(name: "WebRTC", package: "WebRTC")],
+            plugins: ["GenerateSDKVersion"]
+        ),
+        .testTarget(
+            name: "BandwidthRTCTests",
+            dependencies: ["BandwidthRTC"]
+        ),
+    ]
+)

@@ -1,0 +1,36 @@
+name: Publish Release
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  id-token: write
+  contents: write
+
+jobs:
+  build-xcframework:
+    # Only run for production (non-pre-release) releases
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_OUTPUT"
+
+      - name: Build XCFramework
+        id: build
+        uses: ./.github/actions/build-xcframework
+        with:
+          marketing_version: ${{ steps.version.outputs.VERSION }}
+
+      - name: Upload XCFramework to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" "${{ steps.build.outputs.zip_path }}" \
+            --clobber \
+            --repo "${{ github.repository }}"
