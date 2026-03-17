@@ -23,6 +23,8 @@ jobs:
         run: |
           gh release create v${{ steps.version.outputs.VERSION }} \
             --draft \
-            --title "v${{ steps.version.outputs.VERSION }}"
+            --title "v${{ steps.version.outputs.VERSION }}" \
+            --notes "## Changes" \
+            --repo "${{ github.repository }}"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
