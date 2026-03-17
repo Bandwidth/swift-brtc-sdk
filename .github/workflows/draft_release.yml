@@ -19,12 +19,25 @@ jobs:
         id: version
         run: echo "VERSION=$(cat VERSION)" >> "$GITHUB_OUTPUT"
 
-      - name: Create draft release
+      - name: Create or update draft release
         run: |
-          gh release create v${{ steps.version.outputs.VERSION }} \
-            --draft \
-            --title "v${{ steps.version.outputs.VERSION }}" \
-            --notes "## Changes" \
-            --repo "${{ github.repository }}"
+          VERSION="v${{ steps.version.outputs.VERSION }}"
+
+          # Check if draft release already exists
+          IS_DRAFT=$(gh release view "$VERSION" --repo "${{ github.repository }}" --json isDraft -q '.isDraft' 2>/dev/null)
+
+          if [ "$IS_DRAFT" = "true" ]; then
+            # Draft release exists, edit it with new notes
+            gh release edit "$VERSION" \
+              --generate-notes \
+              --repo "${{ github.repository }}"
+          else
+            # Release doesn't exist or is published, create new draft
+            gh release create "$VERSION" \
+              --draft \
+              --title "$VERSION" \
+              --generate-notes \
+              --repo "${{ github.repository }}"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
