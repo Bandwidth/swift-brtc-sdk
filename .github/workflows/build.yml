@@ -28,7 +28,8 @@ jobs:
             echo "::error::VERSION ${{ env.VERSION }} already has a published tag (v${{ env.VERSION }}). Bump the VERSION file."
             exit 1
           fi
-          LATEST_TAG=$(git tag -l 'v*' | sort -V | tail -n1 | sed 's/^v//')
+          LATEST_TAG=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n1 | sed 's/^v//')
+          echo "::notice::Latest existing tag is v$LATEST_TAG"
           if [ -n "$LATEST_TAG" ]; then
             HIGHER=$(printf '%s\n' "$LATEST_TAG" "${{ env.VERSION }}" | sort -V | tail -n1)
             if [ "$HIGHER" != "${{ env.VERSION }}" ]; then
