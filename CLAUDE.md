@@ -89,7 +89,7 @@ Bump VERSION in PR → CI enforces it's higher than main → merge → draft rel
 
 ## CI/CD
 
-### `build.yml` — runs on every push
+### `build.yml` — runs on every branch push (not tags)
 1. On non-main branches: checks `VERSION` > `origin/main:VERSION` (fails with hint if not)
 2. Reads `VERSION` → passes as `marketing_version` to composite action
 3. Builds XCFramework (runs unit tests too)
@@ -97,12 +97,15 @@ Bump VERSION in PR → CI enforces it's higher than main → merge → draft rel
 
 ### `draft_release.yml` — runs on push to main/master
 1. Reads `VERSION`
-2. Creates a draft GitHub release tagged `v{VERSION}`
+2. If a draft release tagged `v{VERSION}` already exists: updates it with auto-generated notes
+3. If a published release tagged `v{VERSION}` already exists: fails with an error (bump `VERSION`)
+4. Otherwise: creates a new draft release tagged `v{VERSION}` with auto-generated notes
 
 ### `release_publish.yml` — runs when a release is published
 1. Reads `VERSION`
 2. Builds XCFramework (no tests)
 3. Uploads `BandwidthRTC.xcframework.zip` to the release assets
+4. Creates annotated major (`v{MAJOR}`) and minor (`v{MAJOR}.{MINOR}`) version tags if they don't already exist
 
 ### `build-xcframework` composite action
 Inputs: `marketing_version`, `run_tests` (default false)
