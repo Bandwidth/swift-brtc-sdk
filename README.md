@@ -101,7 +101,15 @@ Sample apps can be found in [Bandwidth-Samples](https://github.com/Bandwidth-Sam
 
 ## Compatibility
 
-This SDK follows [SemVer 2.0.0](https://semver.org/#semantic-versioning-200).
+This SDK follows [SemVer 2.0.0](https://semver.org/#semantic-versioning-200). Each release publishes three Git tags — `v{MAJOR}`, `v{MAJOR}.{MINOR}`, and `v{MAJOR}.{MINOR}.{PATCH}` — so you can pin at any granularity in your `Package.swift`:
+
+```swift
+// Exact version
+.package(url: "https://github.com/Bandwidth/swift-brtc-sdk", exact: "1.0.0"),
+
+// Latest patch in a minor series
+.package(url: "https://github.com/Bandwidth/swift-brtc-sdk", from: "1.0.0"),
+```
 
 ---
 
