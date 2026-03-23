@@ -12,6 +12,9 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
     var shouldThrowOnConnect: Error? = nil
     var shouldThrowOnSetMediaPreferences: Error? = nil
     var shouldThrowOnOfferSdp: Error? = nil
+    var shouldThrowOnAnswerSdp: Error? = nil
+    var shouldThrowOnRequestOutbound: Error? = nil
+    var shouldThrowOnHangup: Error? = nil
 
     var setMediaPreferencesResult = SetMediaPreferencesResult(
         endpointId: "mock-endpoint",
@@ -23,6 +26,15 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
     var requestOutboundResult = OutboundConnectionResult(accepted: true)
     var hangupResult = HangupResult(result: "ok")
 
+    // MARK: - Concurrency support
+
+    /// Optional delay (in milliseconds) to simulate network latency on connect.
+    var connectDelayMs: UInt64 = 0
+    /// Optional delay (in milliseconds) to simulate network latency on offerSdp.
+    var offerSdpDelayMs: UInt64 = 0
+    /// Optional delay (in milliseconds) to simulate network latency on setMediaPreferences.
+    var setMediaPreferencesDelayMs: UInt64 = 0
+
     // MARK: - Captured calls
 
     private(set) var connectCalledCount = 0
@@ -31,6 +43,8 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
     private(set) var offerSdpCallCount = 0
     private(set) var registeredEvents: [String] = []
     private(set) var removedEvents: [String] = []
+    private(set) var requestOutboundCalls: [(id: String, type: EndpointType)] = []
+    private(set) var hangupCalls: [(endpoint: String, type: EndpointType)] = []
 
     // MARK: - Internal event handlers
 
@@ -42,7 +56,11 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
         lock.lock()
         connectCalledCount += 1
         let error = shouldThrowOnConnect
+        let delay = connectDelayMs
         lock.unlock()
+        if delay > 0 {
+            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+        }
         if let error { throw error }
     }
 
@@ -70,7 +88,11 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
         lock.lock()
         let error = shouldThrowOnSetMediaPreferences
         let result = setMediaPreferencesResult
+        let delay = setMediaPreferencesDelayMs
         lock.unlock()
+        if delay > 0 {
+            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+        }
         if let error { throw error }
         return result
     }
@@ -79,8 +101,12 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
         lock.lock()
         let error = shouldThrowOnOfferSdp
         let result = offerSdpResult
+        let delay = offerSdpDelayMs
         offerSdpCallCount += 1
         lock.unlock()
+        if delay > 0 {
+            try? await Task.sleep(nanoseconds: delay * 1_000_000)
+        }
         if let error { throw error }
         return result
     }
@@ -88,20 +114,28 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
     func answerSdp(sdpAnswer: String, peerType: String) async throws {
         lock.lock()
         answerSdpCalls.append((sdpAnswer: sdpAnswer, peerType: peerType))
+        let error = shouldThrowOnAnswerSdp
         lock.unlock()
+        if let error { throw error }
     }
 
     func requestOutboundConnection(id: String, type: EndpointType) async throws -> OutboundConnectionResult {
         lock.lock()
+        requestOutboundCalls.append((id: id, type: type))
         let result = requestOutboundResult
+        let error = shouldThrowOnRequestOutbound
         lock.unlock()
+        if let error { throw error }
         return result
     }
 
     func hangupConnection(endpoint: String, type: EndpointType) async throws -> HangupResult {
         lock.lock()
+        hangupCalls.append((endpoint: endpoint, type: type))
         let result = hangupResult
+        let error = shouldThrowOnHangup
         lock.unlock()
+        if let error { throw error }
         return result
     }
 
@@ -113,5 +147,12 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
         let handler = eventHandlers[method]
         lock.unlock()
         handler?(data)
+    }
+
+    /// Check if a specific event handler is registered.
+    func hasEventHandler(for method: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return eventHandlers[method] != nil
     }
 }
