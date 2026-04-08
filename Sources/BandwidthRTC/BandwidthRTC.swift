@@ -51,6 +51,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     // MARK: - State
 
     private(set) public var isConnected = false
+    /// True while an outbound or inbound call is active.
+    /// Guards against processing stale SDP offers after hangup.
+    private(set) var hasActiveCall = false
 
     // No pending SDP offers — both are answered during connect() init.
 
@@ -136,8 +139,10 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             self?.onStreamUnavailable?(streamId)
         }
         pcMgr.onSubscribingIceConnectionStateChange = { [weak self] state in
+            Logger.shared.info("Subscribe ICE state changed: \(state.rawValue)")
             if state == .disconnected || state == .failed {
-                Logger.shared.info("Subscribe ICE disconnected/failed — remote side likely hung up")
+                Logger.shared.info("Subscribe ICE disconnected/failed — remote side likely hung up, clearing active call")
+                self?.hasActiveCall = false
                 self?.onRemoteDisconnected?()
             }
         }
@@ -164,6 +169,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
 
         isConnected = true
+        hasActiveCall = true
         Logger.shared.info("Connected to BRTC (endpoint=\(mediaResult.endpointId ?? "unknown"))")
 
         let readyMetadata = ReadyMetadata(
@@ -183,6 +189,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
     private func cleanupSession() async {
         isConnected = false
+        hasActiveCall = false
         peerConnectionManager?.cleanup()
         peerConnectionManager = nil
         _ = mixingDevice?.terminateDevice()
@@ -286,13 +293,18 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Request an outbound connection to a phone number, endpoint, or call ID.
     public func requestOutboundConnection(id: String, type: EndpointType) async throws -> OutboundConnectionResult {
         guard let sig = signaling, isConnected else { throw BandwidthRTCError.notConnected }
+        hasActiveCall = true
         return try await sig.requestOutboundConnection(id: id, type: type)
     }
 
     /// Hang up a connection.
     public func hangupConnection(endpoint: String, type: EndpointType) async throws -> HangupResult {
         guard let sig = signaling, isConnected else { throw BandwidthRTCError.notConnected }
-        return try await sig.hangupConnection(endpoint: endpoint, type: type)
+        Logger.shared.info("hangupConnection called (endpoint=\(endpoint), type=\(type))")
+        let result = try await sig.hangupConnection(endpoint: endpoint, type: type)
+        Logger.shared.info("hangupConnection succeeded (result=\(result.result ?? "nil")) — clearing active call")
+        hasActiveCall = false
+        return result
     }
 
     // MARK: - Configuration
@@ -347,6 +359,11 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
     private func handleSubscribeSdpOffer(_ data: Data) async {
         Logger.shared.debug(">>> Subscribe SDP offer received (\(data.count) bytes)")
+
+        guard hasActiveCall else {
+            Logger.shared.info("Ignoring SDP offer — no active call (post-hangup)")
+            return
+        }
 
         guard let pcManager = peerConnectionManager, let sig = signaling else {
             Logger.shared.error("Subscribe SDP offer received but pcManager or signaling is nil")

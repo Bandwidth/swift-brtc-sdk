@@ -344,6 +344,49 @@ final class BandwidthRTCTests: XCTestCase {
         XCTAssertEqual(result.result, "bye")
     }
 
+    func testConnectSetsActiveCall() async throws {
+        let sut = makeSUT()
+        try await sut.connect(authParams: validAuthParams)
+        XCTAssertTrue(sut.hasActiveCall)
+    }
+
+    func testHangupClearsActiveCall() async throws {
+        let sig = MockSignalingClient()
+        sig.hangupResult = HangupResult(result: "bye")
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        XCTAssertTrue(sut.hasActiveCall)
+        _ = try await sut.hangupConnection(endpoint: "+15551234567", type: .phoneNumber)
+        XCTAssertFalse(sut.hasActiveCall)
+    }
+
+    func testSdpOfferIgnoredAfterHangup() async throws {
+        let sig = MockSignalingClient()
+        sig.hangupResult = HangupResult(result: "bye")
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(signaling: sig, pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        _ = try await sut.hangupConnection(endpoint: "+15551234567", type: .phoneNumber)
+
+        // Simulate server sending a late SDP offer (e.g. voicemail answering)
+        let sdpOfferJson = """
+        {"sdpOffer":"v=0...","peerType":"subscribe","sdpRevision":1}
+        """.data(using: .utf8)!
+        sig.triggerEvent("sdpOffer", data: sdpOfferJson)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(pcManager.handleSubscribeSdpOfferCallCount, 0,
+                       "SDP offer should be ignored after hangup")
+    }
+
+    func testDisconnectClearsActiveCall() async throws {
+        let sut = makeSUT()
+        try await sut.connect(authParams: validAuthParams)
+        await sut.disconnect()
+        XCTAssertFalse(sut.hasActiveCall)
+    }
+
 
 
     // MARK: - Callbacks / Event Handling

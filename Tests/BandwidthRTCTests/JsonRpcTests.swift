@@ -148,4 +148,26 @@ final class JsonRpcTests: XCTestCase {
         XCTAssertEqual(json["endpoint"] as? String, "e164:+15551234567")
         XCTAssertEqual(json["type"] as? String, "PHONE_NUMBER")
     }
+
+    // MARK: - AnyCodable bare string decode
+
+    func testAnyCodableDecodeObjectResult() throws {
+        // Server returns a JSON object — normal case
+        let codable = AnyCodable(["result": "bye"])
+        let hangup = try codable.decode(HangupResult.self)
+        XCTAssertEqual(hangup.result, "bye")
+    }
+
+    func testAnyCodableDecodeBareStringThrowsTypeMismatch() {
+        // Server returns a bare string — this is the ringing hangup case.
+        // AnyCodable.decode wraps it as ["bye"] and tries to decode [HangupResult],
+        // which fails because HangupResult is a struct, not a string.
+        let codable = AnyCodable("bye")
+        XCTAssertThrowsError(try codable.decode(HangupResult.self)) { error in
+            guard case DecodingError.typeMismatch = error else {
+                XCTFail("Expected typeMismatch, got \(error)")
+                return
+            }
+        }
+    }
 }
