@@ -164,6 +164,11 @@ actor SignalingClient {
         guard let result else {
             return HangupResult(result: nil)
         }
+        // When hanging up a ringing call, the server may return a bare string
+        // (e.g. "bye") instead of an object like {"result": "bye"}.
+        if let stringResult = result.value as? String {
+            return HangupResult(result: stringResult)
+        }
         return try result.decode(HangupResult.self)
     }
 
