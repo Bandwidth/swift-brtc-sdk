@@ -407,6 +407,91 @@ final class BandwidthRTCTests: XCTestCase {
         XCTAssertTrue(streamCallbackFired)
     }
 
+    // MARK: - Connect Status
+
+    func testConnectStatusEventFiresOnConnectStatusCallback() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        var receivedMetadata: ReadyMetadata?
+        sut.onConnectStatus = { metadata in
+            receivedMetadata = metadata
+        }
+
+        let statusJson = """
+        {"connectStatus":"COMPLETED","accountId":"9900000","sessionId":"session-1","from":"ep-1","fromType":"ENDPOINT","fromTags":"tag1","to":"ep-2","toType":"ENDPOINT","toTags":"tag2"}
+        """.data(using: .utf8)!
+        sig.triggerEvent("connectStatus", data: statusJson)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(receivedMetadata?.connectStatus, .completed)
+        XCTAssertEqual(receivedMetadata?.accountId, "9900000")
+        XCTAssertEqual(receivedMetadata?.sessionId, "session-1")
+        XCTAssertEqual(receivedMetadata?.from, "ep-1")
+        XCTAssertEqual(receivedMetadata?.fromType, "ENDPOINT")
+        XCTAssertEqual(receivedMetadata?.fromTags, "tag1")
+        XCTAssertEqual(receivedMetadata?.to, "ep-2")
+        XCTAssertEqual(receivedMetadata?.toType, "ENDPOINT")
+        XCTAssertEqual(receivedMetadata?.toTags, "tag2")
+    }
+
+    func testReadyEventWithConnectStatusFields() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+
+        var receivedMetadata: ReadyMetadata?
+        sut.onReady = { metadata in
+            receivedMetadata = metadata
+        }
+        try await sut.connect(authParams: validAuthParams)
+
+        let readyJson = """
+        {"endpointId":"test-ep","deviceId":"dev-1","territory":"US","region":"us-east-1","connectStatus":"TIMED_OUT","accountId":"1234","sessionId":"s-1","from":"ep-a","fromType":"ENDPOINT","to":"ep-b","toType":"PHONE_NUMBER"}
+        """.data(using: .utf8)!
+        sig.triggerEvent("ready", data: readyJson)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertEqual(receivedMetadata?.endpointId, "test-ep")
+        XCTAssertEqual(receivedMetadata?.connectStatus, .timedOut)
+        XCTAssertEqual(receivedMetadata?.accountId, "1234")
+        XCTAssertEqual(receivedMetadata?.to, "ep-b")
+        XCTAssertEqual(receivedMetadata?.toType, "PHONE_NUMBER")
+    }
+
+    func testConnectStatusEventWithEmptyData() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        var receivedMetadata: ReadyMetadata?
+        sut.onConnectStatus = { metadata in
+            receivedMetadata = metadata
+        }
+
+        sig.triggerEvent("connectStatus")
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertNotNil(receivedMetadata)
+        XCTAssertNil(receivedMetadata?.connectStatus)
+    }
+
+    func testConnectStatusEventRegistered() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        XCTAssertTrue(sig.hasEventHandler(for: "connectStatus"))
+    }
+
+    func testEstablishedEventNoLongerRegistered() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        XCTAssertFalse(sig.hasEventHandler(for: "established"))
+    }
+
     func testCloseEventSetsNotConnected() async throws {
         let sig = MockSignalingClient()
         let sut = makeSUT(signaling: sig)

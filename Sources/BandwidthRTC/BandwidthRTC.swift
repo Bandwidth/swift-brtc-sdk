@@ -28,6 +28,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Called when the BRTC platform signals readiness.
     public var onReady: (@Sendable (ReadyMetadata) -> Void)?
 
+    /// Called when the gateway reports a connect status update (terminal outcome of a `<Connect>` verb).
+    public var onConnectStatus: (@Sendable (ReadyMetadata) -> Void)?
+
     /// Called when the remote side disconnects (subscribe ICE disconnected/failed).
     public var onRemoteDisconnected: (@Sendable () -> Void)?
 
@@ -340,9 +343,19 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             self.onReady?(metadata)
         }
 
-        // Handle established event
-        await signaling.onEvent("established") { _ in
-            Logger.shared.debug("Connection established")
+        // Handle connect status event (terminal outcome of a <Connect> verb)
+        await signaling.onEvent("connectStatus") { [weak self] data in
+            guard let self else { return }
+
+            let metadata: ReadyMetadata
+            if data.isEmpty {
+                metadata = ReadyMetadata()
+            } else {
+                metadata = (try? JSONDecoder().decode(ReadyMetadata.self, from: data)) ?? ReadyMetadata()
+            }
+
+            Logger.shared.debug("Connect status event: status=\(metadata.connectStatus.map(String.init(describing:)) ?? "nil")")
+            self.onConnectStatus?(metadata)
         }
 
         // Handle disconnect
