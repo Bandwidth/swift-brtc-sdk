@@ -340,11 +340,6 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             self.onReady?(metadata)
         }
 
-        // Handle established event
-        await signaling.onEvent("established") { _ in
-            Logger.shared.debug("Connection established")
-        }
-
         // Handle disconnect
         await signaling.onEvent("close") { [weak self] _ in
             Logger.shared.warn("WebSocket closed")

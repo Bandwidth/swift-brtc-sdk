@@ -262,8 +262,8 @@ final class ResourceLifecycleTests: XCTestCase {
         let events = sig.registeredEvents
         XCTAssertTrue(events.contains("sdpOffer"))
         XCTAssertTrue(events.contains("ready"))
-        XCTAssertTrue(events.contains("established"))
         XCTAssertTrue(events.contains("close"))
+        XCTAssertFalse(events.contains("established"))
     }
 
     func testReadyEventDeliversToCaller() async throws {
