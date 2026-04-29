@@ -328,7 +328,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             }
         }
 
-        // Handle ready event (may arrive after connect, e.g. for reconnection)
+        // Handle ready event. When connectStatus is present the gateway is reporting
+        // the outcome of a <Connect> verb; route to onConnectStatus. Otherwise this
+        // is the normal session-ready signal; route to onReady.
         await signaling.onEvent("ready") { [weak self] data in
             guard let self else { return }
 
@@ -339,23 +341,13 @@ public final class BandwidthRTCClient: @unchecked Sendable {
                 metadata = (try? JSONDecoder().decode(ReadyMetadata.self, from: data)) ?? ReadyMetadata()
             }
 
-            Logger.shared.debug("Ready event: endpoint=\(metadata.endpointId ?? "nil")")
-            self.onReady?(metadata)
-        }
-
-        // Handle connect status event (terminal outcome of a <Connect> verb)
-        await signaling.onEvent("connectStatus") { [weak self] data in
-            guard let self else { return }
-
-            let metadata: ReadyMetadata
-            if data.isEmpty {
-                metadata = ReadyMetadata()
+            if metadata.connectStatus != nil {
+                Logger.shared.debug("Connect status via ready: status=\(String(describing: metadata.connectStatus!))")
+                self.onConnectStatus?(metadata)
             } else {
-                metadata = (try? JSONDecoder().decode(ReadyMetadata.self, from: data)) ?? ReadyMetadata()
+                Logger.shared.debug("Ready event: endpoint=\(metadata.endpointId ?? "nil")")
+                self.onReady?(metadata)
             }
-
-            Logger.shared.debug("Connect status event: status=\(metadata.connectStatus.map(String.init(describing:)) ?? "nil")")
-            self.onConnectStatus?(metadata)
         }
 
         // Handle disconnect

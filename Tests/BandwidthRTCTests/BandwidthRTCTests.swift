@@ -409,7 +409,7 @@ final class BandwidthRTCTests: XCTestCase {
 
     // MARK: - Connect Status
 
-    func testConnectStatusEventFiresOnConnectStatusCallback() async throws {
+    func testReadyEventWithConnectStatusFiresOnConnectStatusCallback() async throws {
         let sig = MockSignalingClient()
         let sut = makeSUT(signaling: sig)
         try await sut.connect(authParams: validAuthParams)
@@ -419,10 +419,10 @@ final class BandwidthRTCTests: XCTestCase {
             receivedMetadata = metadata
         }
 
-        let statusJson = """
-        {"connectStatus":"COMPLETED","accountId":"9900000","sessionId":"session-1","from":"ep-1","fromType":"ENDPOINT","fromTags":"tag1","to":"ep-2","toType":"ENDPOINT","toTags":"tag2"}
+        let readyJson = """
+        {"endpointId":"ep-1","deviceId":"dev-1","connectStatus":"COMPLETED","accountId":"9900000","sessionId":"session-1","from":"ep-1","fromType":"ENDPOINT","fromTags":"tag1","to":"ep-2","toType":"ENDPOINT","toTags":"tag2"}
         """.data(using: .utf8)!
-        sig.triggerEvent("connectStatus", data: statusJson)
+        sig.triggerEvent("ready", data: readyJson)
         try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(receivedMetadata?.connectStatus, .completed)
@@ -436,7 +436,24 @@ final class BandwidthRTCTests: XCTestCase {
         XCTAssertEqual(receivedMetadata?.toTags, "tag2")
     }
 
-    func testReadyEventWithConnectStatusFields() async throws {
+    func testReadyEventWithConnectStatusDoesNotFireOnReady() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        var onReadyFired = false
+        sut.onReady = { _ in onReadyFired = true }
+
+        let readyJson = """
+        {"endpointId":"ep-1","connectStatus":"COMPLETED","accountId":"1234"}
+        """.data(using: .utf8)!
+        sig.triggerEvent("ready", data: readyJson)
+        try await Task.sleep(for: .milliseconds(50))
+
+        XCTAssertFalse(onReadyFired)
+    }
+
+    func testReadyEventWithoutConnectStatusFiresOnReady() async throws {
         let sig = MockSignalingClient()
         let sut = makeSUT(signaling: sig)
 
@@ -447,41 +464,21 @@ final class BandwidthRTCTests: XCTestCase {
         try await sut.connect(authParams: validAuthParams)
 
         let readyJson = """
-        {"endpointId":"test-ep","deviceId":"dev-1","territory":"US","region":"us-east-1","connectStatus":"TIMED_OUT","accountId":"1234","sessionId":"s-1","from":"ep-a","fromType":"ENDPOINT","to":"ep-b","toType":"PHONE_NUMBER"}
+        {"endpointId":"test-ep","deviceId":"dev-1","territory":"US","region":"us-east-1"}
         """.data(using: .utf8)!
         sig.triggerEvent("ready", data: readyJson)
         try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(receivedMetadata?.endpointId, "test-ep")
-        XCTAssertEqual(receivedMetadata?.connectStatus, .timedOut)
-        XCTAssertEqual(receivedMetadata?.accountId, "1234")
-        XCTAssertEqual(receivedMetadata?.to, "ep-b")
-        XCTAssertEqual(receivedMetadata?.toType, "PHONE_NUMBER")
-    }
-
-    func testConnectStatusEventWithEmptyData() async throws {
-        let sig = MockSignalingClient()
-        let sut = makeSUT(signaling: sig)
-        try await sut.connect(authParams: validAuthParams)
-
-        var receivedMetadata: ReadyMetadata?
-        sut.onConnectStatus = { metadata in
-            receivedMetadata = metadata
-        }
-
-        sig.triggerEvent("connectStatus")
-        try await Task.sleep(for: .milliseconds(50))
-
-        XCTAssertNotNil(receivedMetadata)
         XCTAssertNil(receivedMetadata?.connectStatus)
     }
 
-    func testConnectStatusEventRegistered() async throws {
+    func testConnectStatusEventNoLongerRegistered() async throws {
         let sig = MockSignalingClient()
         let sut = makeSUT(signaling: sig)
         try await sut.connect(authParams: validAuthParams)
 
-        XCTAssertTrue(sig.hasEventHandler(for: "connectStatus"))
+        XCTAssertFalse(sig.hasEventHandler(for: "connectStatus"))
     }
 
     func testEstablishedEventNoLongerRegistered() async throws {
