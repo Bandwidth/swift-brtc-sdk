@@ -28,6 +28,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Called when the BRTC platform signals readiness.
     public var onReady: (@Sendable (ReadyMetadata) -> Void)?
 
+    /// Called when the gateway reports a connect status update (terminal outcome of a `<Connect>` verb).
+    public var onConnectStatus: (@Sendable (ReadyMetadata) -> Void)?
+
     /// Called when the remote side disconnects (subscribe ICE disconnected/failed).
     public var onRemoteDisconnected: (@Sendable () -> Void)?
 
@@ -325,7 +328,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             }
         }
 
-        // Handle ready event (may arrive after connect, e.g. for reconnection)
+        // Handle ready event. When connectStatus is present the gateway is reporting
+        // the outcome of a <Connect> verb; route to onConnectStatus. Otherwise this
+        // is the normal session-ready signal; route to onReady.
         await signaling.onEvent("ready") { [weak self] data in
             guard let self else { return }
 
@@ -336,13 +341,13 @@ public final class BandwidthRTCClient: @unchecked Sendable {
                 metadata = (try? JSONDecoder().decode(ReadyMetadata.self, from: data)) ?? ReadyMetadata()
             }
 
-            Logger.shared.debug("Ready event: endpoint=\(metadata.endpointId ?? "nil")")
-            self.onReady?(metadata)
-        }
-
-        // Handle established event
-        await signaling.onEvent("established") { _ in
-            Logger.shared.debug("Connection established")
+            if metadata.connectStatus != nil {
+                Logger.shared.debug("Connect status via ready: status=\(String(describing: metadata.connectStatus!))")
+                self.onConnectStatus?(metadata)
+            } else {
+                Logger.shared.debug("Ready event: endpoint=\(metadata.endpointId ?? "nil")")
+                self.onReady?(metadata)
+            }
         }
 
         // Handle disconnect
