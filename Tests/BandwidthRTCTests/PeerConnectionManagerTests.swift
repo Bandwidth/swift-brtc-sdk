@@ -163,13 +163,13 @@ final class PeerConnectionManagerTests: XCTestCase {
 
     func testSendDtmfWithNoPublishingPC() {
         // Should not crash when publishingPC is nil
-        sut.sendDtmf("1")
+        sut.sendDtmf("1", duration: 100, interToneGap: 70)
     }
 
     func testSendDtmfWithNoAudioSender() throws {
         try sut.setupPublishingPeerConnection()
         // No audio senders attached — should not crash
-        sut.sendDtmf("2")
+        sut.sendDtmf("2", duration: 100, interToneGap: 70)
     }
 
     // MARK: - Cleanup

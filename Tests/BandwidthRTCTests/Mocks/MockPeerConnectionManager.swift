@@ -36,6 +36,8 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     var setAudioEnabledArg: Bool? = nil
     var setAudioEnabledCallCount = 0
     var sendDtmfArg: String? = nil
+    var sendDtmfDurationArg: Int? = nil
+    var sendDtmfInterToneGapArg: Int? = nil
     var sendDtmfCallCount = 0
     var cleanupCalled = false
     var cleanupCallCount = 0
@@ -112,8 +114,10 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
         setAudioEnabledCallCount += 1
     }
 
-    func sendDtmf(_ tone: String) {
+    func sendDtmf(_ tone: String, duration: Int, interToneGap: Int) {
         sendDtmfArg = tone
+        sendDtmfDurationArg = duration
+        sendDtmfInterToneGapArg = interToneGap
         sendDtmfCallCount += 1
     }
 

@@ -421,15 +421,22 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
 
     // MARK: - DTMF
 
-    func sendDtmf(_ tone: String) {
+    func sendDtmf(_ tone: String, duration: Int, interToneGap: Int) {
         guard let pc = publishingPC else { return }
 
         for sender in pc.senders {
-            if sender.track?.kind == "audio", let dtmfSender = sender.dtmfSender {
-                dtmfSender.insertDtmf(tone, duration: 0.1, interToneGap: 0.05)
-                log.debug("Sent DTMF: \(tone)")
+            guard sender.track?.kind == "audio", let dtmfSender = sender.dtmfSender else { continue }
+            guard dtmfSender.canInsertDtmf else {
+                log.warn("DTMF sender not ready — telephone-event codec may not be negotiated")
                 return
             }
+            dtmfSender.insertDtmf(
+                tone,
+                duration: TimeInterval(duration) / 1000.0,
+                interToneGap: TimeInterval(interToneGap) / 1000.0
+            )
+            log.debug("Sent DTMF: \(tone) (duration: \(duration)ms, interToneGap: \(interToneGap)ms)")
+            return
         }
         log.warn("No audio sender found for DTMF")
     }
