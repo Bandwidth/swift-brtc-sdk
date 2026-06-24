@@ -263,8 +263,12 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     }
 
     /// Send DTMF tones.
-    public func sendDtmf(_ tone: String) {
-        peerConnectionManager?.sendDtmf(tone)
+    /// - Parameters:
+    ///   - tone: The DTMF tones to send — characters from `[0-9,*,#,A-D]`
+    ///   - duration: Tone duration in milliseconds (default 100, range 70–6000)
+    ///   - interToneGap: Gap between tones in milliseconds (default 70, minimum 50)
+    public func sendDtmf(_ tone: String, duration: Int = 100, interToneGap: Int = 70) {
+        peerConnectionManager?.sendDtmf(tone, duration: duration, interToneGap: interToneGap)
     }
 
     /// Get a snapshot of current call statistics.

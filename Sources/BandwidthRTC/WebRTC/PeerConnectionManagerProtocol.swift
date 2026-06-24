@@ -24,7 +24,7 @@ protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
         metadata: [String: StreamMetadata]?
     ) async throws -> String
     func setAudioEnabled(_ enabled: Bool)
-    func sendDtmf(_ tone: String)
+    func sendDtmf(_ tone: String, duration: Int, interToneGap: Int)
     func cleanup()
     func getCallStats(
         previousInboundBytes: Int,
