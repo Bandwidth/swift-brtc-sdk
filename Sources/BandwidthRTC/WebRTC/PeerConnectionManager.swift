@@ -253,12 +253,25 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
                     continuation.resume(throwing: BandwidthRTCError.sdpNegotiationFailed("No SDP offer generated"))
                     return
                 }
+                Self.verifyTelephoneEvent(in: sdp.sdp)
                 continuation.resume(returning: sdp.sdp)
             }
         }
 
         log.debug("Publish SDP offer created (client-initiated)")
         return offerSdp
+    }
+
+    /// Verifies that WebRTC included `telephone-event/8000` in the publish offer.
+    ///
+    /// WebRTC adds telephone-event to every audio offer by default, and the gateway echoes
+    /// it back in its answer, so DTMF is negotiated automatically — no SDP manipulation
+    /// needed. This is a diagnostic only: if the warning ever fires, the local WebRTC stack
+    /// is not offering DTMF on its own, which points at the binary/OS rather than this SDK
+    /// (a useful signal when investigating DTMF failures on a specific iOS version).
+    private static func verifyTelephoneEvent(in sdp: String) {
+        guard !sdp.contains("telephone-event") else { return }
+        Logger.shared.warn("Publish offer has no telephone-event codec — DTMF will not negotiate")
     }
 
     /// Apply the server's SDP answer to the publish PC after offerSdp returns.
@@ -424,21 +437,31 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     func sendDtmf(_ tone: String, duration: Int, interToneGap: Int) {
         guard let pc = publishingPC else { return }
 
-        for sender in pc.senders {
-            guard sender.track?.kind == "audio", let dtmfSender = sender.dtmfSender else { continue }
-            guard dtmfSender.canInsertDtmf else {
-                log.warn("DTMF sender not ready — telephone-event codec may not be negotiated")
-                return
-            }
-            dtmfSender.insertDtmf(
-                tone,
-                duration: TimeInterval(duration) / 1000.0,
-                interToneGap: TimeInterval(interToneGap) / 1000.0
-            )
-            log.debug("Sent DTMF: \(tone) (duration: \(duration)ms, interToneGap: \(interToneGap)ms)")
+        // Pick the first sender that is actually ready to insert DTMF. We must keep scanning
+        // past senders that aren't ready (non-audio, or telephone-event not yet negotiated)
+        // rather than giving up on the first one — otherwise DTMF is silently dropped when a
+        // not-ready sender happens to come first.
+        guard let idx = Self.firstDtmfReadyIndex(in: pc.senders),
+              let dtmfSender = pc.senders[idx].dtmfSender else {
+            log.warn("No ready DTMF sender found — telephone-event codec may not be negotiated")
             return
         }
-        log.warn("No audio sender found for DTMF")
+
+        dtmfSender.insertDtmf(
+            tone,
+            duration: TimeInterval(duration) / 1000.0,
+            interToneGap: TimeInterval(interToneGap) / 1000.0
+        )
+        log.debug("Sent DTMF: \(tone) (duration: \(duration)ms, interToneGap: \(interToneGap)ms)")
+    }
+
+    /// Index of the first sender ready to insert DTMF, or `nil` if none are.
+    ///
+    /// Skips senders that aren't ready and returns the first one that *is*, so a not-ready
+    /// sender appearing before a ready one does not block DTMF. Generic over `DtmfReadiness`
+    /// so the selection logic can be unit-tested without live WebRTC senders.
+    static func firstDtmfReadyIndex<S: DtmfReadiness>(in senders: [S]) -> Int? {
+        senders.firstIndex { $0.isDtmfReady }
     }
 
     // MARK: - Audio Stats
@@ -600,6 +623,22 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         log.info("Peer connections cleaned up")
     }
 
+}
+
+// MARK: - DTMF Readiness
+
+/// Whether an RTP sender is ready to insert DTMF tones. Abstracted from `RTCRtpSender` so
+/// `PeerConnectionManager.firstDtmfReadyIndex(in:)` can be tested without live WebRTC senders.
+protocol DtmfReadiness {
+    var isDtmfReady: Bool { get }
+}
+
+extension RTCRtpSender: DtmfReadiness {
+    /// Ready only when this sender carries an audio track whose DTMF sender can insert tones
+    /// (i.e. telephone-event was negotiated).
+    var isDtmfReady: Bool {
+        track?.kind == "audio" && (dtmfSender?.canInsertDtmf ?? false)
+    }
 }
 
 // MARK: - RTCPeerConnectionDelegate
