@@ -253,12 +253,25 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
                     continuation.resume(throwing: BandwidthRTCError.sdpNegotiationFailed("No SDP offer generated"))
                     return
                 }
+                Self.verifyTelephoneEvent(in: sdp.sdp)
                 continuation.resume(returning: sdp.sdp)
             }
         }
 
         log.debug("Publish SDP offer created (client-initiated)")
         return offerSdp
+    }
+
+    /// Verifies that WebRTC included `telephone-event/8000` in the publish offer.
+    ///
+    /// WebRTC adds telephone-event to every audio offer by default, and the gateway echoes
+    /// it back in its answer, so DTMF is negotiated automatically — no SDP manipulation
+    /// needed. This is a diagnostic only: if the warning ever fires, the local WebRTC stack
+    /// is not offering DTMF on its own, which points at the binary/OS rather than this SDK
+    /// (a useful signal when investigating DTMF failures on a specific iOS version).
+    private static func verifyTelephoneEvent(in sdp: String) {
+        guard !sdp.contains("telephone-event") else { return }
+        Logger.shared.warn("Publish offer has no telephone-event codec — DTMF will not negotiate")
     }
 
     /// Apply the server's SDP answer to the publish PC after offerSdp returns.
@@ -426,10 +439,9 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
 
         for sender in pc.senders {
             guard sender.track?.kind == "audio", let dtmfSender = sender.dtmfSender else { continue }
-            guard dtmfSender.canInsertDtmf else {
-                log.warn("DTMF sender not ready — telephone-event codec may not be negotiated")
-                return
-            }
+            // Skip senders that aren't ready (e.g. telephone-event not yet negotiated) and keep
+            // scanning — bailing here would silently drop DTMF when a not-ready sender comes first.
+            guard dtmfSender.canInsertDtmf else { continue }
             dtmfSender.insertDtmf(
                 tone,
                 duration: TimeInterval(duration) / 1000.0,
@@ -438,7 +450,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             log.debug("Sent DTMF: \(tone) (duration: \(duration)ms, interToneGap: \(interToneGap)ms)")
             return
         }
-        log.warn("No audio sender found for DTMF")
+        log.warn("No ready DTMF sender found for DTMF")
     }
 
     // MARK: - Audio Stats
