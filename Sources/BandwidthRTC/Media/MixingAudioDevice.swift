@@ -305,6 +305,15 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     private func installMicTap() {
         let inputNode = engine.inputNode
         let nativeFormat = inputNode.outputFormat(forBus: 0)
+
+        // nativeFormat.sampleRate is 0 when there's no real audio hardware (e.g. a headless
+        // CI simulator) — installing a tap or converter on that invalid format throws, so
+        // bail out entirely rather than capturing mic audio that doesn't exist anyway.
+        guard nativeFormat.sampleRate > 0 else {
+            log.warn("[BRTC] No valid audio input hardware — skipping mic tap installation")
+            return
+        }
+
         let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: audioOptions.inputSampleRate,
