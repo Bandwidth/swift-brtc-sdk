@@ -8,7 +8,7 @@ For product documentation, see the [Bandwidth RTC developer docs](https://dev.ba
 
 ## Requirements
 
-- iOS 17+
+- iOS 15+
 - Swift 5.9+
 - Xcode 16+
 - Swift Package Manager

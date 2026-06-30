@@ -145,7 +145,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             if Date() >= deadline {
                 throw BandwidthRTCError.publishFailed("ICE connection timed out after \(Int(timeoutSeconds))s")
             }
-            try? await Task.sleep(for: .milliseconds(50))
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
     }
 
@@ -462,7 +462,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         audioStatsTask?.cancel()
         audioStatsTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(interval))
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
                 guard !Task.isCancelled, let self else { break }
                 self.logAudioStats()
             }

@@ -97,7 +97,7 @@ final class ResourceLifecycleTests: XCTestCase {
         try await sut.connect(authParams: validAuthParams)
 
         sig.triggerEvent("close")
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertFalse(sut.isConnected)
         XCTAssertTrue(pcManager.cleanupCalled)
@@ -110,7 +110,7 @@ final class ResourceLifecycleTests: XCTestCase {
         try await sut.connect(authParams: validAuthParams)
 
         sig.triggerEvent("close")
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertNil(sut.mixingDevice)
     }
@@ -121,7 +121,7 @@ final class ResourceLifecycleTests: XCTestCase {
         try await sut.connect(authParams: validAuthParams)
 
         sig.triggerEvent("close")
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
 
         await XCTAssertThrowsErrorAsync(try await sut.publish()) { error in
             XCTAssertEqual(error as? BandwidthRTCError, .notConnected)
@@ -297,7 +297,7 @@ final class ResourceLifecycleTests: XCTestCase {
         """.data(using: .utf8)!
         sig.triggerEvent("ready", data: jsonData)
 
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(receivedMetadata?.endpointId, "ep-from-event")
     }
 
@@ -312,7 +312,7 @@ final class ResourceLifecycleTests: XCTestCase {
         receivedMetadata = nil
 
         sig.triggerEvent("ready", data: Data())
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertNotNil(receivedMetadata)
     }
 

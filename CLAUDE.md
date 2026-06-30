@@ -2,7 +2,7 @@
 
 ## What this repo is
 
-A Swift iOS SDK (`BandwidthRTC`) that wraps WebRTC to provide real-time audio calling via the Bandwidth BRTC gateway. Distributed as a signed XCFramework. iOS 17+, Swift 5.9+, SPM-only.
+A Swift iOS SDK (`BandwidthRTC`) that wraps WebRTC to provide real-time audio calling via the Bandwidth BRTC gateway. Distributed as a signed XCFramework. iOS 15+, Swift 5.9+, SPM-only.
 
 ---
 

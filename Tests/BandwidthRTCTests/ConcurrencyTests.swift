@@ -41,7 +41,7 @@ final class ConcurrencyTests: XCTestCase {
         }
 
         // Start disconnect slightly after
-        try? await Task.sleep(for: .milliseconds(20))
+        try? await Task.sleep(nanoseconds: 20_000_000)
         let disconnectTask = Task {
             await sut.disconnect()
         }
@@ -202,7 +202,7 @@ final class ConcurrencyTests: XCTestCase {
         sig.triggerEvent("ready", data: "{}".data(using: .utf8)!)
 
         // Give events time to process
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
 
         // Still connected, no crash
         XCTAssertTrue(sut.isConnected)
@@ -221,7 +221,7 @@ final class ConcurrencyTests: XCTestCase {
         sig.triggerEvent("ready", data: "{}".data(using: .utf8)!)
         sig.triggerEvent("close")
 
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(nanoseconds: 100_000_000)
 
         // After close, should be disconnected
         XCTAssertFalse(sut.isConnected)

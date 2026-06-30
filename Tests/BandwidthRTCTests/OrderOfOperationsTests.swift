@@ -246,7 +246,7 @@ final class OrderOfOperationsTests: XCTestCase {
         """.data(using: .utf8)!
         sig.triggerEvent("sdpOffer", data: sdpOfferData)
 
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(nanoseconds: 100_000_000)
 
         // The mock threw, so no answerSdp should have been sent for the subscribe offer
         // (the initial connect may have sent answerSdp calls, but not for this event)
@@ -269,7 +269,7 @@ final class OrderOfOperationsTests: XCTestCase {
         """.data(using: .utf8)!
         sig.triggerEvent("sdpOffer", data: sdpOfferData)
 
-        try await Task.sleep(for: .milliseconds(200))
+        try await Task.sleep(nanoseconds: 200_000_000)
 
         XCTAssertEqual(pcManager.handleSubscribeSdpOfferCallCount, 1)
         XCTAssertGreaterThan(sig.answerSdpCalls.count, answerSdpCountBefore)
@@ -282,7 +282,7 @@ final class OrderOfOperationsTests: XCTestCase {
 
         // Trigger with invalid JSON
         sig.triggerEvent("sdpOffer", data: "not-json".data(using: .utf8)!)
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(nanoseconds: 100_000_000)
 
         // Should not crash; no answerSdp sent beyond initial connect
         XCTAssertTrue(sut.isConnected)
@@ -301,7 +301,7 @@ final class OrderOfOperationsTests: XCTestCase {
         {"sdpOffer": "v=0...", "sdpRevision": 1}
         """.data(using: .utf8)!)
 
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(nanoseconds: 100_000_000)
         // No crash = pass
     }
 
