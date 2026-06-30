@@ -374,7 +374,7 @@ final class BandwidthRTCTests: XCTestCase {
         {"sdpOffer":"v=0...","peerType":"subscribe","sdpRevision":1}
         """.data(using: .utf8)!
         sig.triggerEvent("sdpOffer", data: sdpOfferJson)
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertEqual(pcManager.handleSubscribeSdpOfferCallCount, 0,
                        "SDP offer should be ignored after hangup")
@@ -416,7 +416,7 @@ final class BandwidthRTCTests: XCTestCase {
         sig.triggerEvent("close")
 
         // Give the async closure a tick to run
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertFalse(sut.isConnected)
     }
 }

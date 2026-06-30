@@ -239,7 +239,7 @@ final class PeerConnectionManagerTests: XCTestCase {
             try? await self.sut.waitForPublishIceConnected()
         }
         // Give the task time to suspend
-        try? await Task.sleep(for: .milliseconds(20))
+        try? await Task.sleep(nanoseconds: 20_000_000)
 
         sut.peerConnection(sut.publishingPC!, didChange: .connected)
 

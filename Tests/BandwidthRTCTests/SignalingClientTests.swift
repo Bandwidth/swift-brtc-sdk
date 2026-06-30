@@ -19,7 +19,7 @@ final class SignalingClientTests: XCTestCase {
         let task = Task {
             try await sut.connect(authParams: self.validAuthParams, options: nil)
         }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         task.cancel()
 
         guard let url = capturedURL else {
@@ -38,7 +38,7 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let task = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         task.cancel()
 
         let connected = await sut.isConnected
@@ -51,7 +51,7 @@ final class SignalingClientTests: XCTestCase {
 
         // First connect
         let task = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         task.cancel()
 
         // Second connect — should throw
@@ -84,7 +84,7 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let task = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         task.cancel()
 
         await sut.disconnect()
@@ -98,14 +98,14 @@ final class SignalingClientTests: XCTestCase {
 
         // Connect
         let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         connectTask.cancel()
 
         // Start an RPC call that will block waiting for a response
         let rpcTask = Task<SetMediaPreferencesResult?, Never> {
             try? await sut.setMediaPreferences()
         }
-        try await Task.sleep(for: .milliseconds(20))
+        try await Task.sleep(nanoseconds: 20_000_000)
 
         // Disconnect should fail pending requests
         await sut.disconnect()
@@ -121,14 +121,14 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         connectTask.cancel()
 
         // Launch RPC call
         let rpcTask = Task {
             try await sut.setMediaPreferences()
         }
-        try await Task.sleep(for: .milliseconds(20))
+        try await Task.sleep(nanoseconds: 20_000_000)
 
         // Deliver a 403 error response for request id "1"
         let errorJson = """
@@ -146,11 +146,11 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         connectTask.cancel()
 
         let rpcTask = Task { try await sut.setMediaPreferences() }
-        try await Task.sleep(for: .milliseconds(20))
+        try await Task.sleep(nanoseconds: 20_000_000)
 
         let errorJson = """
         {"jsonrpc":"2.0","id":"1","error":{"code":401,"message":"invalid token provided"}}
@@ -167,11 +167,11 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         connectTask.cancel()
 
         let rpcTask = Task { try await sut.setMediaPreferences() }
-        try await Task.sleep(for: .milliseconds(20))
+        try await Task.sleep(nanoseconds: 20_000_000)
 
         let errorJson = """
         {"jsonrpc":"2.0","id":"1","error":{"code":500,"message":"Internal server error"}}
@@ -200,7 +200,7 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         connectTask.cancel()
 
         // Response for unknown request id — should not crash
@@ -208,7 +208,7 @@ final class SignalingClientTests: XCTestCase {
         {"jsonrpc":"2.0","id":"999","result":{}}
         """.data(using: .utf8)!
         mockWS.enqueue(.string(String(data: unknownResponse, encoding: .utf8)!))
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         // No crash = pass
     }
 
@@ -219,7 +219,7 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         connectTask.cancel()
 
         var receivedData: Data?
@@ -229,7 +229,7 @@ final class SignalingClientTests: XCTestCase {
         {"jsonrpc":"2.0","method":"ready","params":{"endpointId":"ep-1"}}
         """.data(using: .utf8)!
         mockWS.enqueue(.string(String(data: notification, encoding: .utf8)!))
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertNotNil(receivedData)
     }
@@ -239,7 +239,7 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         connectTask.cancel()
 
         var callCount = 0
@@ -250,7 +250,7 @@ final class SignalingClientTests: XCTestCase {
         {"jsonrpc":"2.0","method":"ready","params":{}}
         """.data(using: .utf8)!
         mockWS.enqueue(.string(String(data: notification, encoding: .utf8)!))
-        try await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertEqual(callCount, 0)
     }
@@ -260,7 +260,7 @@ final class SignalingClientTests: XCTestCase {
         let sut = SignalingClient { _ in (mockWS, nil) }
 
         let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
-        try await Task.sleep(for: .milliseconds(50))
+        try await Task.sleep(nanoseconds: 50_000_000)
         connectTask.cancel()
 
         let closeExpectation = expectation(description: "close event fired")
