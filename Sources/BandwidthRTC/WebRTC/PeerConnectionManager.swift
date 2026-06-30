@@ -437,31 +437,20 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     func sendDtmf(_ tone: String, duration: Int, interToneGap: Int) {
         guard let pc = publishingPC else { return }
 
-        // Pick the first sender that is actually ready to insert DTMF. We must keep scanning
-        // past senders that aren't ready (non-audio, or telephone-event not yet negotiated)
-        // rather than giving up on the first one — otherwise DTMF is silently dropped when a
-        // not-ready sender happens to come first.
-        guard let idx = Self.firstDtmfReadyIndex(in: pc.senders),
-              let dtmfSender = pc.senders[idx].dtmfSender else {
-            log.warn("No ready DTMF sender found — telephone-event codec may not be negotiated")
+        for sender in pc.senders {
+            guard sender.track?.kind == "audio", let dtmfSender = sender.dtmfSender else { continue }
+            // Skip senders that aren't ready (e.g. telephone-event not yet negotiated) and keep
+            // scanning — bailing here would silently drop DTMF when a not-ready sender comes first.
+            guard dtmfSender.canInsertDtmf else { continue }
+            dtmfSender.insertDtmf(
+                tone,
+                duration: TimeInterval(duration) / 1000.0,
+                interToneGap: TimeInterval(interToneGap) / 1000.0
+            )
+            log.debug("Sent DTMF: \(tone) (duration: \(duration)ms, interToneGap: \(interToneGap)ms)")
             return
         }
-
-        dtmfSender.insertDtmf(
-            tone,
-            duration: TimeInterval(duration) / 1000.0,
-            interToneGap: TimeInterval(interToneGap) / 1000.0
-        )
-        log.debug("Sent DTMF: \(tone) (duration: \(duration)ms, interToneGap: \(interToneGap)ms)")
-    }
-
-    /// Index of the first sender ready to insert DTMF, or `nil` if none are.
-    ///
-    /// Skips senders that aren't ready and returns the first one that *is*, so a not-ready
-    /// sender appearing before a ready one does not block DTMF. Generic over `DtmfReadiness`
-    /// so the selection logic can be unit-tested without live WebRTC senders.
-    static func firstDtmfReadyIndex<S: DtmfReadiness>(in senders: [S]) -> Int? {
-        senders.firstIndex { $0.isDtmfReady }
+        log.warn("No ready DTMF sender found for DTMF")
     }
 
     // MARK: - Audio Stats
@@ -623,22 +612,6 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         log.info("Peer connections cleaned up")
     }
 
-}
-
-// MARK: - DTMF Readiness
-
-/// Whether an RTP sender is ready to insert DTMF tones. Abstracted from `RTCRtpSender` so
-/// `PeerConnectionManager.firstDtmfReadyIndex(in:)` can be tested without live WebRTC senders.
-protocol DtmfReadiness {
-    var isDtmfReady: Bool { get }
-}
-
-extension RTCRtpSender: DtmfReadiness {
-    /// Ready only when this sender carries an audio track whose DTMF sender can insert tones
-    /// (i.e. telephone-event was negotiated).
-    var isDtmfReady: Bool {
-        track?.kind == "audio" && (dtmfSender?.canInsertDtmf ?? false)
-    }
 }
 
 // MARK: - RTCPeerConnectionDelegate

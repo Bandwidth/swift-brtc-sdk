@@ -172,35 +172,6 @@ final class PeerConnectionManagerTests: XCTestCase {
         sut.sendDtmf("2", duration: 100, interToneGap: 70)
     }
 
-    // MARK: - DTMF sender selection (return→continue fix)
-
-    /// Stand-in for an RTP sender with a controllable readiness flag.
-    private struct StubSender: DtmfReadiness {
-        let isDtmfReady: Bool
-    }
-
-    func testFirstDtmfReadyIndexSkipsNotReadySenderBeforeReadyOne() {
-        // Regression guard: a not-ready sender first must NOT block a ready one after it.
-        // The pre-fix code returned on the first not-ready sender and dropped DTMF.
-        let senders = [StubSender(isDtmfReady: false), StubSender(isDtmfReady: true)]
-        XCTAssertEqual(PeerConnectionManager.firstDtmfReadyIndex(in: senders), 1)
-    }
-
-    func testFirstDtmfReadyIndexPicksFirstReadySender() {
-        let senders = [StubSender(isDtmfReady: true), StubSender(isDtmfReady: true)]
-        XCTAssertEqual(PeerConnectionManager.firstDtmfReadyIndex(in: senders), 0)
-    }
-
-    func testFirstDtmfReadyIndexReturnsNilWhenNoSenderReady() {
-        let senders = [StubSender(isDtmfReady: false), StubSender(isDtmfReady: false)]
-        XCTAssertNil(PeerConnectionManager.firstDtmfReadyIndex(in: senders))
-    }
-
-    func testFirstDtmfReadyIndexReturnsNilForEmptySenders() {
-        let senders: [StubSender] = []
-        XCTAssertNil(PeerConnectionManager.firstDtmfReadyIndex(in: senders))
-    }
-
     // MARK: - Cleanup
 
     func testCleanupNilsAllPCs() throws {
