@@ -2,13 +2,16 @@ import Foundation
 
 struct SetMediaPreferencesParams: Codable {
     let `protocol`: String
+    let autoAccept: Bool
 
-    init() {
+    init(autoAccept: Bool = true) {
         self.protocol = "WEBRTC"
+        self.autoAccept = autoAccept
     }
 
     enum CodingKeys: String, CodingKey {
         case `protocol` = "protocol"
+        case autoAccept = "autoAccept"
     }
 }
 

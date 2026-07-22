@@ -166,7 +166,7 @@ final class ConcurrencyTests: XCTestCase {
         let factory = RTCPeerConnectionFactory()
         for i in 0..<5 {
             let stream = factory.mediaStream(withStreamId: "stream-\(i)")
-            pcManager.onStreamAvailable?(stream, [.audio])
+            pcManager.onStreamAvailable?(stream, [.audio], nil)
         }
 
         // All callbacks should fire

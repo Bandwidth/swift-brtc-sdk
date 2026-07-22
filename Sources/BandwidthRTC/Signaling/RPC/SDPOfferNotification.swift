@@ -6,5 +6,5 @@ struct SDPOfferNotification: Decodable {
     let peerType: String?
     let sdpOffer: String
     let sdpRevision: Int?
-    let streamSourceMetadata: [String: StreamMetadata]?
+    let trackMetadata: [String: TrackMetadata]?
 }

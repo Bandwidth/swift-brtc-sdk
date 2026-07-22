@@ -31,12 +31,12 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     // MARK: - Stream Tracking
 
     private var publishedStreams: [String: RTCMediaStream] = [:]
-    private var subscribedStreamMetadata: [String: StreamMetadata] = [:]
+    private var subscribedTrackMetadata: [String: TrackMetadata] = [:]
     private(set) var subscribeSdpRevision: Int = 0
 
     // MARK: - Callbacks
 
-    var onStreamAvailable: ((RTCMediaStream, [MediaType]) -> Void)?
+    var onStreamAvailable: ((RTCMediaStream, [MediaType], TrackMetadata?) -> Void)?
     var onStreamUnavailable: ((String) -> Void)?
     var onPublishingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)?
     var onSubscribingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)?
@@ -317,7 +317,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     func handleSubscribeSdpOffer(
         sdpOffer: String,
         sdpRevision: Int?,
-        metadata: [String: StreamMetadata]?
+        metadata: [String: TrackMetadata]?
     ) async throws -> String {
         let effectiveRevision = sdpRevision ?? (subscribeSdpRevision + 1)
 
@@ -337,9 +337,9 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
 
         log.debug("[subscribe] Handling offer (revision=\(effectiveRevision), signalingState=\(pc.signalingState.rawValue))")
 
-        // Update metadata
+        // Update track metadata (keyed by track id, populated during the delegate callback)
         if let metadata {
-            subscribedStreamMetadata.merge(metadata) { _, new in new }
+            subscribedTrackMetadata.merge(metadata) { _, new in new }
         }
 
         // No SDP munging — pass raw SDP directly
@@ -592,7 +592,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             for track in stream.audioTracks { track.isEnabled = false }
         }
         publishedStreams.removeAll()
-        subscribedStreamMetadata.removeAll()
+        subscribedTrackMetadata.removeAll()
 
         for dc in [publishHeartbeatDC, publishDiagnosticsDC, subscribeHeartbeatDC, subscribeDiagnosticsDC].compactMap({ $0 }) {
             log.debug("Closing data channel: \(dc.label)")
@@ -634,8 +634,18 @@ extension PeerConnectionManager: RTCPeerConnectionDelegate {
         var mediaTypes: [MediaType] = []
         if !stream.audioTracks.isEmpty { mediaTypes.append(.audio) }
 
+        // Look up track metadata by the first audio track's id (gateway adds exactly one audio track per call)
+        var trackMetadata: TrackMetadata?
+        if let firstAudioTrack = stream.audioTracks.first {
+            trackMetadata = subscribedTrackMetadata[firstAudioTrack.trackId]
+            // Consume the metadata once used
+            if trackMetadata != nil {
+                subscribedTrackMetadata.removeValue(forKey: firstAudioTrack.trackId)
+            }
+        }
+
         DispatchQueue.main.async { [weak self] in
-            self?.onStreamAvailable?(stream, mediaTypes)
+            self?.onStreamAvailable?(stream, mediaTypes, trackMetadata)
         }
     }
 

@@ -402,7 +402,7 @@ final class BandwidthRTCTests: XCTestCase {
         // Simulate PCManager firing the callback
         let factory = RTCPeerConnectionFactory()
         let stream = factory.mediaStream(withStreamId: "test-stream")
-        pcManager.onStreamAvailable?(stream, [.audio])
+        pcManager.onStreamAvailable?(stream, [.audio], nil)
 
         XCTAssertTrue(streamCallbackFired)
     }

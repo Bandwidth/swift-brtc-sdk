@@ -130,8 +130,15 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
 
         // Wire up peer connection callbacks
-        pcMgr.onStreamAvailable = { [weak self] stream, mediaTypes in
-            let rtcStream = RtcStream(mediaStream: stream, mediaTypes: mediaTypes)
+        pcMgr.onStreamAvailable = { [weak self] stream, mediaTypes, trackMetadata in
+            let rtcStream = RtcStream(
+                mediaStream: stream,
+                mediaTypes: mediaTypes,
+                from: trackMetadata?.from,
+                fromType: trackMetadata?.fromType,
+                autoAccepted: trackMetadata?.autoAccepted,
+                tags: trackMetadata?.tags
+            )
             // Always fire raw callback for backward compatibility
             self?.onStreamAvailable?(rtcStream)
         }
@@ -149,8 +156,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
         // Send setMediaPreferences to initiate the signaling flow.
         // The server responds with endpointId, deviceId, publishSdpOffer, and subscribeSdpOffer.
-        let mediaResult = try await sig.setMediaPreferences()
-        Logger.shared.debug("setMediaPreferences result: endpoint=\(mediaResult.endpointId ?? "nil"), hasPublishOffer=\(mediaResult.publishSdpOffer != nil), hasSubscribeOffer=\(mediaResult.subscribeSdpOffer != nil)")
+        let autoAccept = options?.autoAccept ?? true
+        let mediaResult = try await sig.setMediaPreferences(autoAccept: autoAccept)
+        Logger.shared.debug("setMediaPreferences result: endpoint=\(mediaResult.endpointId ?? "nil"), hasPublishOffer=\(mediaResult.publishSdpOffer != nil), hasSubscribeOffer=\(mediaResult.subscribeSdpOffer != nil), autoAccept=\(autoAccept)")
 
         // Answer BOTH initial SDP offers immediately (no tracks).
         // This establishes both peer connections, ICE, DTLS, and data channels right away.
@@ -311,6 +319,24 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         return result
     }
 
+    /// Accept a parked inbound call, allowing audio to flow.
+    /// Used when `autoAccept: false` is set in RtcOptions; the call remains ringing until accepted.
+    public func acceptStream() async throws {
+        guard let sig = signaling, isConnected else { throw BandwidthRTCError.notConnected }
+        Logger.shared.info("acceptStream called")
+        try await sig.acceptStream()
+        Logger.shared.debug("acceptStream succeeded")
+    }
+
+    /// Decline (reject) a parked inbound call.
+    /// Used when `autoAccept: false` is set in RtcOptions; ends the ringing call.
+    public func declineStream() async throws {
+        guard let sig = signaling, isConnected else { throw BandwidthRTCError.notConnected }
+        Logger.shared.info("declineStream called")
+        try await sig.declineStream()
+        Logger.shared.debug("declineStream succeeded")
+    }
+
     // MARK: - Configuration
 
     /// Set the SDK log level.
@@ -385,12 +411,12 @@ public final class BandwidthRTCClient: @unchecked Sendable {
                 return
             }
 
-            Logger.shared.debug("Subscribe SDP offer: revision=\(notification.sdpRevision.map(String.init) ?? "nil"), peerType=\(notification.peerType ?? "nil"), endpointId=\(notification.endpointId ?? "nil"), metadata keys=\(notification.streamSourceMetadata?.keys.joined(separator: ",") ?? "none")")
+            Logger.shared.debug("Subscribe SDP offer: revision=\(notification.sdpRevision.map(String.init) ?? "nil"), peerType=\(notification.peerType ?? "nil"), endpointId=\(notification.endpointId ?? "nil"), metadata keys=\(notification.trackMetadata?.keys.joined(separator: ",") ?? "none")")
 
             let answerSdp = try await pcManager.handleSubscribeSdpOffer(
                 sdpOffer: notification.sdpOffer,
                 sdpRevision: notification.sdpRevision,
-                metadata: notification.streamSourceMetadata
+                metadata: notification.trackMetadata
             )
 
             try await sig.answerSdp(sdpAnswer: answerSdp, peerType: "subscribe")

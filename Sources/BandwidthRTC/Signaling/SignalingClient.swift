@@ -127,8 +127,8 @@ actor SignalingClient {
 
     // MARK: - RPC Methods
 
-    func setMediaPreferences() async throws -> SetMediaPreferencesResult {
-        let result = try await call(method: "setMediaPreferences", params: SetMediaPreferencesParams())
+    func setMediaPreferences(autoAccept: Bool = true) async throws -> SetMediaPreferencesResult {
+        let result = try await call(method: "setMediaPreferences", params: SetMediaPreferencesParams(autoAccept: autoAccept))
         guard let result else {
             return SetMediaPreferencesResult(endpointId: nil, deviceId: nil, publishSdpOffer: nil, subscribeSdpOffer: nil)
         }
@@ -170,6 +170,14 @@ actor SignalingClient {
             return HangupResult(result: stringResult)
         }
         return try result.decode(HangupResult.self)
+    }
+
+    func acceptStream() async throws {
+        _ = try await call(method: "acceptStream", params: EmptyParams())
+    }
+
+    func declineStream() async throws {
+        _ = try await call(method: "declineStream", params: EmptyParams())
     }
 
     // MARK: - Private: JSON-RPC Call/Notify
