@@ -192,7 +192,7 @@ final class PeerConnectionManagerTests: XCTestCase {
     func testStreamAddedCallsOnStreamAvailable() throws {
         try sut.setupSubscribingPeerConnection()
         var callbackFired = false
-        sut.onStreamAvailable = { _, _ in callbackFired = true }
+        sut.onStreamAvailable = { _, _, _ in callbackFired = true }
 
         let factory = RTCPeerConnectionFactory()
         let stream = factory.mediaStream(withStreamId: "test-stream")

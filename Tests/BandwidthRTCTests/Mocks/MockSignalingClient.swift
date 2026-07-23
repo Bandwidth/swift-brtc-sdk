@@ -15,6 +15,8 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
     var shouldThrowOnAnswerSdp: Error? = nil
     var shouldThrowOnRequestOutbound: Error? = nil
     var shouldThrowOnHangup: Error? = nil
+    var shouldThrowOnAcceptStream: Error? = nil
+    var shouldThrowOnDeclineStream: Error? = nil
 
     var setMediaPreferencesResult = SetMediaPreferencesResult(
         endpointId: "mock-endpoint",
@@ -84,7 +86,7 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
         lock.unlock()
     }
 
-    func setMediaPreferences() async throws -> SetMediaPreferencesResult {
+    func setMediaPreferences(autoAccept: Bool = true) async throws -> SetMediaPreferencesResult {
         lock.lock()
         let error = shouldThrowOnSetMediaPreferences
         let result = setMediaPreferencesResult
@@ -137,6 +139,20 @@ final class MockSignalingClient: @unchecked Sendable, SignalingClientProtocol {
         lock.unlock()
         if let error { throw error }
         return result
+    }
+
+    func acceptStream() async throws {
+        lock.lock()
+        let error = shouldThrowOnAcceptStream
+        lock.unlock()
+        if let error { throw error }
+    }
+
+    func declineStream() async throws {
+        lock.lock()
+        let error = shouldThrowOnDeclineStream
+        lock.unlock()
+        if let error { throw error }
     }
 
     // MARK: - Test helpers

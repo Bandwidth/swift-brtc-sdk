@@ -3,7 +3,7 @@ import WebRTC
 
 /// Protocol abstracting PeerConnectionManager for testability.
 protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
-    var onStreamAvailable: ((RTCMediaStream, [MediaType]) -> Void)? { get set }
+    var onStreamAvailable: ((RTCMediaStream, [MediaType], TrackMetadata?) -> Void)? { get set }
     var onStreamUnavailable: ((String) -> Void)? { get set }
     var onSubscribingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)? { get set }
 
@@ -21,7 +21,7 @@ protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
     func handleSubscribeSdpOffer(
         sdpOffer: String,
         sdpRevision: Int?,
-        metadata: [String: StreamMetadata]?
+        metadata: [String: TrackMetadata]?
     ) async throws -> String
     func setAudioEnabled(_ enabled: Bool)
     func sendDtmf(_ tone: String, duration: Int, interToneGap: Int)

@@ -126,7 +126,7 @@ final class JsonRpcTests: XCTestCase {
           "peerType": "subscribe",
           "sdpRevision": 3,
           "endpointId": "ep-1",
-          "streamSourceMetadata": {}
+          "trackMetadata": {}
         }
         """.data(using: .utf8)!
         let notification = try decoder.decode(SDPOfferNotification.self, from: json)
@@ -135,7 +135,7 @@ final class JsonRpcTests: XCTestCase {
         XCTAssertEqual(notification.peerType, "subscribe")
         XCTAssertEqual(notification.sdpRevision, 3)
         XCTAssertEqual(notification.endpointId, "ep-1")
-        XCTAssertNotNil(notification.streamSourceMetadata)
+        XCTAssertNotNil(notification.trackMetadata)
     }
 
     // MARK: - HangupConnectionParams encoding

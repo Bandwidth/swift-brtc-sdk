@@ -7,7 +7,7 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
 
     // MARK: - Callbacks (protocol requirement)
 
-    var onStreamAvailable: ((RTCMediaStream, [MediaType]) -> Void)?
+    var onStreamAvailable: ((RTCMediaStream, [MediaType], TrackMetadata?) -> Void)?
     var onStreamUnavailable: ((String) -> Void)?
     var onSubscribingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)?
 
@@ -102,7 +102,7 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     func handleSubscribeSdpOffer(
         sdpOffer: String,
         sdpRevision: Int?,
-        metadata: [String: StreamMetadata]?
+        metadata: [String: TrackMetadata]?
     ) async throws -> String {
         handleSubscribeSdpOfferCallCount += 1
         if let error = shouldThrowOnHandleSubscribeSdpOffer { throw error }
