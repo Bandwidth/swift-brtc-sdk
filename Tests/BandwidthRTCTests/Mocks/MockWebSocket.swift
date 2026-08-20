@@ -17,6 +17,9 @@ final class MockWebSocket: @unchecked Sendable, WebSocketProtocol {
     private(set) var cancelCalled: Bool = false
     private(set) var capturedCancelCode: URLSessionWebSocketTask.CloseCode?
 
+    /// Settable so tests can simulate a rejected handshake (e.g. HTTP 403/409).
+    var response: URLResponse?
+
     // MARK: - WebSocketProtocol
 
     func resume() {

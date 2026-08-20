@@ -31,6 +31,11 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Called when the remote side disconnects (subscribe ICE disconnected/failed).
     public var onRemoteDisconnected: (@Sendable () -> Void)?
 
+    /// Called when the signaling WebSocket closes, with a classified reason.
+    /// `.invalidToken` and `.endpointOccupied` are non-retryable — the token is bad, or another
+    /// device already holds this endpoint — so the app should not blindly call `connect()` again.
+    public var onDisconnected: (@Sendable (BandwidthRTCError) -> Void)?
+
     /// Called with Float32 audio samples for visualization after each mic capture or file chunk.
     /// Array contains 480+ samples (10ms+ at 48kHz).
     public var onLocalAudioLevel: (@Sendable ([Float32]) -> Void)?
@@ -376,7 +381,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
 
         // Handle disconnect
-        await signaling.onEvent("close") { [weak self] _ in
+        await signaling.onEvent("close") { [weak self] data in
             Logger.shared.warn("WebSocket closed")
             self?.isConnected = false
             // Nil out the peer connection manager so a subsequent connect() call
@@ -384,6 +389,16 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             self?.peerConnectionManager?.cleanup()
             self?.peerConnectionManager = nil
             self?.mixingDevice = nil
+
+            let statusCode = (try? JSONDecoder().decode(WebSocketCloseInfo.self, from: data))?.statusCode
+            switch statusCode {
+            case 403:
+                self?.onDisconnected?(.invalidToken)
+            case 409:
+                self?.onDisconnected?(.endpointOccupied)
+            default:
+                self?.onDisconnected?(.webSocketDisconnected)
+            }
         }
     }
 
