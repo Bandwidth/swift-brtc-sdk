@@ -3,6 +3,8 @@ import Foundation
 /// Errors that can occur during BRTC operations.
 public enum BandwidthRTCError: Error, LocalizedError, Equatable {
     case invalidToken
+    /// The gateway rejected the connection because another device already holds this endpoint (HTTP 409).
+    case endpointOccupied
     case connectionFailed(String)
     case signalingError(String)
     case webSocketDisconnected
@@ -19,6 +21,8 @@ public enum BandwidthRTCError: Error, LocalizedError, Equatable {
         switch self {
         case .invalidToken:
             return "Invalid or expired endpoint token"
+        case .endpointOccupied:
+            return "Endpoint already has an active connection from a different device"
         case .connectionFailed(let detail):
             return "Connection failed: \(detail)"
         case .signalingError(let detail):
