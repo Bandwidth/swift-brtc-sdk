@@ -44,6 +44,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Array contains 480+ samples (10ms+ at 48kHz).
     public var onRemoteAudioLevel: (@Sendable ([Float32]) -> Void)?
 
+    /// Called once per DTMF tone queued for local playback on a published stream (see `sendDtmf`).
+    public var onDtmfSent: (@Sendable (DtmfSentEvent) -> Void)?
+
     // MARK: - Internal Components
 
     var signaling: (any SignalingClientProtocol)?
@@ -149,6 +152,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
         pcMgr.onStreamUnavailable = { [weak self] streamId in
             self?.onStreamUnavailable?(streamId)
+        }
+        pcMgr.onDtmfSent = { [weak self] event in
+            self?.onDtmfSent?(event)
         }
         pcMgr.onSubscribingIceConnectionStateChange = { [weak self] state in
             Logger.shared.info("Subscribe ICE state changed: \(state.rawValue)")
