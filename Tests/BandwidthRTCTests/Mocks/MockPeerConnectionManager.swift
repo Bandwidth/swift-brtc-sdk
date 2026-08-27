@@ -10,6 +10,7 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     var onStreamAvailable: ((RTCMediaStream, [MediaType], TrackMetadata?) -> Void)?
     var onStreamUnavailable: ((String) -> Void)?
     var onSubscribingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)?
+    var onDtmfSent: ((DtmfSentEvent) -> Void)?
 
     // MARK: - Configuration
 
