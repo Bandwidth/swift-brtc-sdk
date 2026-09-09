@@ -12,6 +12,10 @@ protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
     @discardableResult
     func setupSubscribingPeerConnection() throws -> RTCPeerConnection
 
+    func resetPeerConnections() throws
+    @discardableResult
+    func reattachPublishedStreams() -> Int
+
     func waitForPublishIceConnected() async throws
     func answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType) async throws -> String
     func addLocalTracks(audio: Bool) -> RTCMediaStream

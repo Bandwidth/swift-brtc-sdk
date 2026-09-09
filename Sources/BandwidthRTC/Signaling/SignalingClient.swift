@@ -9,6 +9,12 @@ private let sdkVersion = SDKVersion.current
 /// Ping interval in seconds.
 private let pingInterval: TimeInterval = 60
 
+/// Payload delivered to the `close` event handler describing why the socket went away.
+struct SocketCloseInfo: Codable {
+    /// HTTP status of the upgrade response, when the gateway rejected the handshake.
+    let httpStatusCode: Int?
+}
+
 /// Actor that manages the WebSocket connection and JSON-RPC signaling with the BRTC gateway.
 actor SignalingClient {
     private let log = Logger.shared
@@ -74,6 +80,10 @@ actor SignalingClient {
         log.debug("Gateway URL: \(url)")
         log.info("Connecting to \(url.host ?? "unknown")")
 
+        // Release anything left over from a previous session so a reconnect does not leak
+        // receive/ping tasks or URLSessions.
+        teardownTransport()
+
         let (ws, session) = webSocketFactory(url)
         ws.resume()
 
@@ -97,6 +107,18 @@ actor SignalingClient {
         sendNotification(method: "leave", params: EmptyParams())
         log.debug("Leave notification sent")
 
+        teardownTransport()
+        isConnected = false
+
+        // Fail any pending requests
+        for (_, continuation) in pendingRequests {
+            continuation.resume(throwing: BandwidthRTCError.webSocketDisconnected)
+        }
+        pendingRequests.removeAll()
+    }
+
+    /// Cancel the receive/ping loops and release the socket and its URLSession.
+    private func teardownTransport() {
         receiveTask?.cancel()
         receiveTask = nil
         pingTask?.cancel()
@@ -106,13 +128,6 @@ actor SignalingClient {
         webSocket = nil
         urlSession?.invalidateAndCancel()
         urlSession = nil
-        isConnected = false
-
-        // Fail any pending requests
-        for (_, continuation) in pendingRequests {
-            continuation.resume(throwing: BandwidthRTCError.webSocketDisconnected)
-        }
-        pendingRequests.removeAll()
     }
 
     // MARK: - Event Handlers
@@ -331,9 +346,12 @@ actor SignalingClient {
         pendingRequests.removeAll()
 
         if wasConnected {
-            // Notify disconnect handler
+            // Notify disconnect handler, carrying the upgrade status when the gateway refused
+            // the handshake (403/409 arrive as an HTTP response, not a WebSocket close frame).
             if let handler = eventHandlers["close"] {
-                handler(Data())
+                let status = (webSocket?.response as? HTTPURLResponse)?.statusCode
+                let info = SocketCloseInfo(httpStatusCode: status)
+                handler((try? JSONEncoder().encode(info)) ?? Data())
             }
         }
     }

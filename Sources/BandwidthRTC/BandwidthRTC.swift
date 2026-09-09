@@ -2,6 +2,16 @@ import AVFoundation
 import Foundation
 import WebRTC
 
+/// Maximum number of reconnect attempts after an unexpected websocket close.
+private let maxReconnectAttempts = 6
+
+/// Upper bound on the exponential backoff between reconnect attempts, in seconds.
+private let maxReconnectDelay: TimeInterval = 16
+
+/// Handshake rejections that will recur on every retry, so reconnecting is pointless:
+/// 403 (invalid token) and 409 (the gateway still has this endpoint marked connected).
+private let fatalHandshakeStatusCodes: Set<Int> = [403, 409]
+
 /// Main entry point for the Bandwidth BRTC SDK.
 ///
 /// Usage:
@@ -39,11 +49,17 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Array contains 480+ samples (10ms+ at 48kHz).
     public var onRemoteAudioLevel: (@Sendable ([Float32]) -> Void)?
 
+    /// Called when the SDK gives up on a session it cannot repair by itself — reconnect attempts
+    /// exhausted or refused, or published streams that could not be restored after a reconnect.
+    /// The session is unusable when this fires with `.reconnectFailed`; `isConnected` is false.
+    public var onError: (@Sendable (Error) -> Void)?
+
     // MARK: - Internal Components
 
     var signaling: (any SignalingClientProtocol)?
     var peerConnectionManager: (any PeerConnectionManagerProtocol)?
     private var options: RtcOptions?
+    private var authParams: RtcAuthParams?
 
     // Custom ADM — owns mic capture and remote audio playout
     public private(set) var mixingDevice: MixingAudioDevice?
@@ -54,6 +70,18 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// True while an outbound or inbound call is active.
     /// Guards against processing stale SDP offers after hangup.
     private(set) var hasActiveCall = false
+
+    /// Set by `disconnect()` so a socket close the application asked for never triggers a reconnect.
+    private(set) var intentionalDisconnect = false
+
+    /// Guards against overlapping reconnect loops while one is already running.
+    private var reconnectTask: Task<Void, Never>?
+
+    /// HTTP status of the most recent failed upgrade, when the gateway refused the handshake.
+    private var lastCloseStatusCode: Int?
+
+    /// First backoff delay, in seconds. Overridable so tests do not have to wait a real second.
+    var reconnectBaseDelay: TimeInterval = 1
 
     // No pending SDP offers — both are answered during connect() init.
 
@@ -85,6 +113,17 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         guard !isConnected else { throw BandwidthRTCError.alreadyConnected }
 
         self.options = options
+        self.authParams = authParams
+        self.intentionalDisconnect = false
+        self.lastCloseStatusCode = nil
+
+        try await establishSession()
+    }
+
+    /// Open the websocket, (re)build the peer connections, and complete the initial SDP handshake.
+    /// Used by both `connect()` and the reconnect loop.
+    private func establishSession() async throws {
+        guard let authParams else { throw BandwidthRTCError.notConnected }
 
         // Use injected signaling or create new
         let sig: any SignalingClientProtocol
@@ -102,32 +141,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         // Connect WebSocket
         try await sig.connect(authParams: authParams, options: options)
 
-        // Use injected peer connection manager or create new
-        let pcMgr: any PeerConnectionManagerProtocol
-        if let injected = self.peerConnectionManager {
-            // Reusing injected peer connection manager (for testing)
-            pcMgr = injected
-        } else {
-            // Clean up any stale state from a previous session that dropped without a clean disconnect
-            // This only applies when creating a new manager, not when reusing an injected one
-            if peerConnectionManager != nil {
-                Logger.shared.warn("connect() called with stale state — cleaning up previous session")
-                await cleanupSession()
-            }
-
-            // Create the custom ADM — it owns audio session config, mic capture, and playout
-            let mixing = MixingAudioDevice(audioOptions: options?.audioProcessing ?? AudioProcessingOptions())
-            mixing.onLocalAudioLevel = { [weak self] samples in self?.onLocalAudioLevel?(samples) }
-            mixing.onRemoteAudioLevel = { [weak self] samples in self?.onRemoteAudioLevel?(samples) }
-            self.mixingDevice = mixing
-
-            // Set up peer connections with the custom ADM
-            let newPCMgr = PeerConnectionManager(options: options, audioDevice: mixing)
-            self.peerConnectionManager = newPCMgr
-            try newPCMgr.setupPublishingPeerConnection()
-            try newPCMgr.setupSubscribingPeerConnection()
-            pcMgr = newPCMgr
-        }
+        let pcMgr = try preparePeerConnectionManager()
 
         // Wire up peer connection callbacks
         pcMgr.onStreamAvailable = { [weak self] stream, mediaTypes, trackMetadata in
@@ -187,8 +201,35 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         onReady?(readyMetadata)
     }
 
+    /// Reuse the existing peer connection manager (rebuilding its peer connections) or create one.
+    /// Reusing keeps the factory, the audio device, and the retained published streams alive, and
+    /// closing the dead peer connections before opening new ones is what stops repeated reconnects
+    /// from leaking them.
+    private func preparePeerConnectionManager() throws -> any PeerConnectionManagerProtocol {
+        if let existing = peerConnectionManager {
+            try existing.resetPeerConnections()
+            return existing
+        }
+
+        // Create the custom ADM — it owns audio session config, mic capture, and playout
+        let mixing = MixingAudioDevice(audioOptions: options?.audioProcessing ?? AudioProcessingOptions())
+        mixing.onLocalAudioLevel = { [weak self] samples in self?.onLocalAudioLevel?(samples) }
+        mixing.onRemoteAudioLevel = { [weak self] samples in self?.onRemoteAudioLevel?(samples) }
+        self.mixingDevice = mixing
+
+        // Set up peer connections with the custom ADM
+        let newPCMgr = PeerConnectionManager(options: options, audioDevice: mixing)
+        self.peerConnectionManager = newPCMgr
+        try newPCMgr.setupPublishingPeerConnection()
+        try newPCMgr.setupSubscribingPeerConnection()
+        return newPCMgr
+    }
+
     /// Disconnect from the BRTC platform.
     public func disconnect() async {
+        intentionalDisconnect = true
+        reconnectTask?.cancel()
+        reconnectTask = nil
         await self.cleanupSession()
         Logger.shared.info("Disconnected from BRTC")
     }
@@ -204,6 +245,109 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         mixingDevice = nil
         await signaling?.disconnect()
         signaling = nil
+    }
+
+    // MARK: - Private: Reconnect
+
+    /// Decide what to do about a websocket that closed without the application asking.
+    private func handleSocketClosed() {
+        guard !intentionalDisconnect else {
+            Logger.shared.debug("WebSocket closed after disconnect() — not reconnecting")
+            return
+        }
+        if let code = lastCloseStatusCode, fatalHandshakeStatusCodes.contains(code) {
+            Logger.shared.error("Gateway refused the connection (HTTP \(code)) — not reconnecting")
+            failSession(BandwidthRTCError.reconnectFailed("gateway refused the connection (HTTP \(code))"))
+            return
+        }
+        guard reconnectTask == nil else { return }
+        reconnectTask = Task { [weak self] in
+            await self?.reconnect()
+            self?.reconnectTask = nil
+        }
+    }
+
+    /// Re-establish the session with bounded exponential backoff, then restore published streams.
+    private func reconnect() async {
+        var delay = reconnectBaseDelay
+        var lastError: Error = BandwidthRTCError.webSocketDisconnected
+
+        for attempt in 1...maxReconnectAttempts {
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if intentionalDisconnect || Task.isCancelled { return }
+
+            Logger.shared.info("Reconnect attempt \(attempt)/\(maxReconnectAttempts)")
+            lastCloseStatusCode = nil
+            do {
+                try await establishSession()
+            } catch {
+                lastError = error
+                Logger.shared.warn("Reconnect attempt \(attempt) failed: \(error)")
+                if isFatalHandshakeError(error) {
+                    Logger.shared.error("Gateway refused the connection — not retrying")
+                    break
+                }
+                delay = min(delay * 2, maxReconnectDelay)
+                continue
+            }
+
+            // The socket is back. Restore published streams once; a failure here leaves the
+            // session up but not publishing, so it has to reach the application rather than
+            // being retried into a 409 from the gateway.
+            do {
+                try await republishRetainedStreams()
+                Logger.shared.info("Reconnected")
+            } catch {
+                Logger.shared.error("Failed to restore published streams after reconnect: \(error)")
+                onError?(BandwidthRTCError.publishFailed(error.localizedDescription))
+            }
+            return
+        }
+
+        Logger.shared.error("Reconnect exhausted after \(maxReconnectAttempts) attempts")
+        await cleanupSession()
+        onError?(BandwidthRTCError.reconnectFailed(lastError.localizedDescription))
+    }
+
+    /// Tear the session down and tell the application, for failures we will not retry.
+    private func failSession(_ error: Error) {
+        Task { [weak self] in
+            await self?.cleanupSession()
+            self?.onError?(error)
+        }
+    }
+
+    /// Handshake rejections surfaced through the RPC layer rather than the upgrade response.
+    private func isFatalHandshakeError(_ error: Error) -> Bool {
+        if let code = lastCloseStatusCode, fatalHandshakeStatusCodes.contains(code) { return true }
+        switch error {
+        case BandwidthRTCError.invalidToken:
+            return true
+        case BandwidthRTCError.rpcError(let code, _):
+            return fatalHandshakeStatusCodes.contains(code)
+        default:
+            return false
+        }
+    }
+
+    /// Re-attach every retained published stream to the new publishing peer connection and
+    /// renegotiate once for all of them. A no-op when nothing was ever published.
+    private func republishRetainedStreams() async throws {
+        guard let pcManager = peerConnectionManager, let signalingClient = signaling else {
+            throw BandwidthRTCError.notConnected
+        }
+
+        try await pcManager.waitForPublishIceConnected()
+
+        guard pcManager.reattachPublishedStreams() > 0 else {
+            Logger.shared.debug("Nothing published — skipping republish")
+            return
+        }
+
+        let localOffer = try await pcManager.createPublishOffer()
+        let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
+        try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
+        Logger.shared.info("Republished retained streams")
     }
 
     // MARK: - Publishing
@@ -376,14 +520,16 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
 
         // Handle disconnect
-        await signaling.onEvent("close") { [weak self] _ in
-            Logger.shared.warn("WebSocket closed")
-            self?.isConnected = false
-            // Nil out the peer connection manager so a subsequent connect() call
-            // creates a fresh one rather than reusing stale peer connections.
-            self?.peerConnectionManager?.cleanup()
-            self?.peerConnectionManager = nil
-            self?.mixingDevice = nil
+        await signaling.onEvent("close") { [weak self] data in
+            guard let self else { return }
+            let status = (try? JSONDecoder().decode(SocketCloseInfo.self, from: data))?.httpStatusCode
+            Logger.shared.warn("WebSocket closed (status=\(status.map(String.init) ?? "none"))")
+            self.isConnected = false
+            self.hasActiveCall = false
+            self.lastCloseStatusCode = status
+            // The peer connections are dead but are kept (along with the audio device and the
+            // retained published streams) until the next attempt resets them.
+            self.handleSocketClosed()
         }
     }
 

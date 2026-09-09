@@ -42,6 +42,8 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     var cleanupCalled = false
     var cleanupCallCount = 0
     var waitForPublishIceConnectedCallCount = 0
+    var resetPeerConnectionsCallCount = 0
+    var reattachPublishedStreamsCallCount = 0
     var handleSubscribeSdpOfferCallCount = 0
     var answerInitialOfferCallCount = 0
 
@@ -65,6 +67,21 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
         fatalError("setupSubscribingPeerConnection called on mock — inject mock before connect()")
     }
 
+    /// Number of streams the mock pretends are retained; drives the replay path.
+    var retainedStreamCount = 0
+    var shouldThrowOnResetPeerConnections: Error? = nil
+
+    func resetPeerConnections() throws {
+        resetPeerConnectionsCallCount += 1
+        if let error = shouldThrowOnResetPeerConnections { throw error }
+    }
+
+    @discardableResult
+    func reattachPublishedStreams() -> Int {
+        reattachPublishedStreamsCallCount += 1
+        return retainedStreamCount
+    }
+
     func waitForPublishIceConnected() async throws {
         waitForPublishIceConnectedCallCount += 1
         if let error = shouldThrowOnWaitForIce { throw error }
@@ -82,12 +99,14 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     func addLocalTracks(audio: Bool) -> RTCMediaStream {
         addLocalTracksAudioArg = audio
         addLocalTracksCallCount += 1
+        retainedStreamCount += 1
         return Self.sharedFactory.mediaStream(withStreamId: "mock-\(UUID().uuidString)")
     }
 
     var removeLocalTracksStreamIdArg: String? = nil
     func removeLocalTracks(streamId: String) {
         removeLocalTracksStreamIdArg = streamId
+        retainedStreamCount = max(0, retainedStreamCount - 1)
     }
 
     func createPublishOffer() async throws -> String {
@@ -124,6 +143,7 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     func cleanup() {
         cleanupCalled = true
         cleanupCallCount += 1
+        retainedStreamCount = 0
     }
 
     func getCallStats(

@@ -90,7 +90,7 @@ final class ResourceLifecycleTests: XCTestCase {
 
     // MARK: - Close Event Cleanup
 
-    func testCloseEventCleansUpPeerConnectionManager() async throws {
+    func testCloseEventMarksDisconnectedAndRetainsManagerForReconnect() async throws {
         let sig = MockSignalingClient()
         let pcManager = MockPeerConnectionManager()
         let sut = makeSUT(signaling: sig, pcManager: pcManager)
@@ -100,20 +100,12 @@ final class ResourceLifecycleTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertFalse(sut.isConnected)
-        XCTAssertTrue(pcManager.cleanupCalled)
-        XCTAssertNil(sut.peerConnectionManager)
+        // The manager (and its retained published streams) is kept so the reconnect can
+        // reset its peer connections rather than build a whole new one.
+        XCTAssertFalse(pcManager.cleanupCalled)
+        XCTAssertNotNil(sut.peerConnectionManager)
     }
 
-    func testCloseEventNilsMixingDevice() async throws {
-        let sig = MockSignalingClient()
-        let sut = makeSUT(signaling: sig)
-        try await sut.connect(authParams: validAuthParams)
-
-        sig.triggerEvent("close")
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        XCTAssertNil(sut.mixingDevice)
-    }
 
     func testOperationsAfterCloseEventFail() async throws {
         let sig = MockSignalingClient()
