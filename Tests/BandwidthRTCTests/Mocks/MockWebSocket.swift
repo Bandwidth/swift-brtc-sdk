@@ -17,7 +17,7 @@ final class MockWebSocket: @unchecked Sendable, WebSocketProtocol {
     private(set) var cancelCalled: Bool = false
     private(set) var capturedCancelCode: URLSessionWebSocketTask.CloseCode?
 
-    /// Stubbed upgrade response — set to an HTTPURLResponse to simulate a gateway rejection.
+    /// Stubbed upgrade response - set to an HTTPURLResponse to simulate a gateway rejection.
     var response: URLResponse?
 
     // MARK: - WebSocketProtocol

@@ -93,7 +93,7 @@ final class ReconnectTests: XCTestCase {
             XCTAssertEqual(sig.connectCalledCount, expectedConnects)
         }
 
-        // Same manager throughout — each attempt closes the dead peer connections before
+        // Same manager throughout - each attempt closes the dead peer connections before
         // opening new ones, so nothing is leaked.
         XCTAssertTrue(sut.peerConnectionManager === pcManager)
         XCTAssertEqual(pcManager.resetPeerConnectionsCallCount, 4)
@@ -201,7 +201,7 @@ final class ReconnectTests: XCTestCase {
         XCTAssertEqual(stream.streamId, streamId)
         XCTAssertEqual(stream.audioTracks.count, 1)
 
-        // Whatever ended, what is attached is live and enabled — a dead track here would produce
+        // Whatever ended, what is attached is live and enabled - a dead track here would produce
         // a sender that never sends RTP.
         let attached = stream.audioTracks[0]
         XCTAssertEqual(attached.trackId, originalTrackId)

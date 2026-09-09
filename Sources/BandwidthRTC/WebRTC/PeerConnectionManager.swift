@@ -632,7 +632,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     }
 
     /// Re-attach every retained published stream to the current publishing peer connection.
-    /// Returns the number of streams re-attached — zero when nothing was ever published, which
+    /// Returns the number of streams re-attached - zero when nothing was ever published, which
     /// lets the caller skip renegotiation entirely on a first connect.
     @discardableResult
     func reattachPublishedStreams() -> Int {

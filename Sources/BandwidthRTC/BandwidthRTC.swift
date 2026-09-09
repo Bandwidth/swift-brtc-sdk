@@ -8,6 +8,10 @@ private let maxReconnectAttempts = 6
 /// Upper bound on the exponential backoff between reconnect attempts, in seconds.
 private let maxReconnectDelay: TimeInterval = 16
 
+/// Fraction of the current backoff added as random jitter, to spread out clients that were all
+/// disconnected by the same event.
+private let jitterFraction: Double = 0.5
+
 /// Handshake rejections that will recur on every retry, so reconnecting is pointless:
 /// 403 (invalid token) and 409 (the gateway still has this endpoint marked connected).
 private let fatalHandshakeStatusCodes: Set<Int> = [403, 409]
@@ -49,7 +53,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Array contains 480+ samples (10ms+ at 48kHz).
     public var onRemoteAudioLevel: (@Sendable ([Float32]) -> Void)?
 
-    /// Called when the SDK gives up on a session it cannot repair by itself — reconnect attempts
+    /// Called when the SDK gives up on a session it cannot repair by itself - reconnect attempts
     /// exhausted or refused, or published streams that could not be restored after a reconnect.
     /// The session is unusable when this fires with `.reconnectFailed`; `isConnected` is false.
     public var onError: (@Sendable (Error) -> Void)?
@@ -211,7 +215,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             return existing
         }
 
-        // Create the custom ADM — it owns audio session config, mic capture, and playout
+        // Create the custom ADM - it owns audio session config, mic capture, and playout
         let mixing = MixingAudioDevice(audioOptions: options?.audioProcessing ?? AudioProcessingOptions())
         mixing.onLocalAudioLevel = { [weak self] samples in self?.onLocalAudioLevel?(samples) }
         mixing.onRemoteAudioLevel = { [weak self] samples in self?.onRemoteAudioLevel?(samples) }
@@ -252,11 +256,11 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Decide what to do about a websocket that closed without the application asking.
     private func handleSocketClosed() {
         guard !intentionalDisconnect else {
-            Logger.shared.debug("WebSocket closed after disconnect() — not reconnecting")
+            Logger.shared.debug("WebSocket closed after disconnect() - not reconnecting")
             return
         }
         if let code = lastCloseStatusCode, fatalHandshakeStatusCodes.contains(code) {
-            Logger.shared.error("Gateway refused the connection (HTTP \(code)) — not reconnecting")
+            Logger.shared.error("Gateway refused the connection (HTTP \(code)) - not reconnecting")
             failSession(BandwidthRTCError.reconnectFailed("gateway refused the connection (HTTP \(code))"))
             return
         }
@@ -273,7 +277,10 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         var lastError: Error = BandwidthRTCError.webSocketDisconnected
 
         for attempt in 1...maxReconnectAttempts {
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            // Jitter matters here specifically: a gateway drain evicts every idle endpoint on an
+            // instance within the same sweep, so without it they all wake and retry in lockstep.
+            let jittered = delay + Double.random(in: 0...(delay * jitterFraction))
+            try? await Task.sleep(nanoseconds: UInt64(jittered * 1_000_000_000))
             if intentionalDisconnect || Task.isCancelled { return }
 
             Logger.shared.info("Reconnect attempt \(attempt)/\(maxReconnectAttempts)")
@@ -284,7 +291,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
                 lastError = error
                 Logger.shared.warn("Reconnect attempt \(attempt) failed: \(error)")
                 if isFatalHandshakeError(error) {
-                    Logger.shared.error("Gateway refused the connection — not retrying")
+                    Logger.shared.error("Gateway refused the connection - not retrying")
                     break
                 }
                 delay = min(delay * 2, maxReconnectDelay)
@@ -304,7 +311,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             return
         }
 
-        Logger.shared.error("Reconnect exhausted after \(maxReconnectAttempts) attempts")
+        // Reached either by exhausting every attempt or by breaking out of the loop on a
+        // refusal we will not retry, so report the reason rather than assuming exhaustion.
+        Logger.shared.error("Giving up on reconnect: \(lastError)")
         await cleanupSession()
         onError?(BandwidthRTCError.reconnectFailed(lastError.localizedDescription))
     }
@@ -340,7 +349,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         try await pcManager.waitForPublishIceConnected()
 
         guard pcManager.reattachPublishedStreams() > 0 else {
-            Logger.shared.debug("Nothing published — skipping republish")
+            Logger.shared.debug("Nothing published - skipping republish")
             return
         }
 
