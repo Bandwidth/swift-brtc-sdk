@@ -107,6 +107,56 @@ final class ResourceLifecycleTests: XCTestCase {
     }
 
 
+    func testCloseEventWith409ReportsEndpointOccupied() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        var reported: BandwidthRTCError?
+        sut.onDisconnected = { reported = $0 }
+
+        // Another device already holds this endpoint.
+        let data = try JSONEncoder().encode(WebSocketCloseInfo(statusCode: 409))
+        sig.triggerEvent("close", data: data)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(reported, .endpointOccupied)
+    }
+
+    func testCloseEventWith403ReportsInvalidToken() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        var reported: BandwidthRTCError?
+        sut.onDisconnected = { reported = $0 }
+
+        let data = try JSONEncoder().encode(WebSocketCloseInfo(statusCode: 403))
+        sig.triggerEvent("close", data: data)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(reported, .invalidToken)
+    }
+
+    func testCloseEventWithNoStatusCodeReconnectsInsteadOfReportingImmediately() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        // Long enough that the reconnect loop is still asleep on its first attempt when we assert.
+        sut.reconnectBaseDelay = 10
+        try await sut.connect(authParams: validAuthParams)
+
+        var reported: BandwidthRTCError?
+        sut.onDisconnected = { reported = $0 }
+
+        sig.triggerEvent("close")
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        // Unlike 403/409, an unclassified close is not a reason to give up - the SDK retries
+        // it first (see ReconnectTests) and only reports through onDisconnected if that fails.
+        XCTAssertNil(reported)
+        XCTAssertFalse(sut.isConnected)
+    }
+
     func testOperationsAfterCloseEventFail() async throws {
         let sig = MockSignalingClient()
         let sut = makeSUT(signaling: sig)

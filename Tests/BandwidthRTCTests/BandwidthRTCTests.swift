@@ -306,6 +306,19 @@ final class BandwidthRTCTests: XCTestCase {
         XCTAssertEqual(pcManager.sendDtmfArg, "1")
     }
 
+    func testOnDtmfSentForwardsPCManagerEvent() async throws {
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+
+        var receivedEvent: DtmfSentEvent?
+        sut.onDtmfSent = { event in receivedEvent = event }
+        pcManager.onDtmfSent?(DtmfSentEvent(tone: "1", streamId: "stream-1"))
+
+        XCTAssertEqual(receivedEvent?.tone, "1")
+        XCTAssertEqual(receivedEvent?.streamId, "stream-1")
+    }
+
     // MARK: - Outbound Calls
 
     func testRequestOutboundConnectionThrowsIfNotConnected() async {

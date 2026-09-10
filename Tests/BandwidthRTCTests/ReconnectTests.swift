@@ -109,7 +109,7 @@ final class ReconnectTests: XCTestCase {
         _ = try await sut.publish()
 
         let errorBox = ErrorBox()
-        sut.onError = { errorBox.value = $0 }
+        sut.onDisconnected = { errorBox.value = $0 }
         sig.shouldThrowOnOfferSdp = BandwidthRTCError.sdpNegotiationFailed("boom")
 
         sig.triggerEvent("close")
@@ -141,23 +141,22 @@ final class ReconnectTests: XCTestCase {
     // MARK: - Fatal handshake rejections
 
     func testGatewayRefusalDoesNotReconnect() async throws {
-        for status in [403, 409] {
+        let expected: [Int: BandwidthRTCError] = [403: .invalidToken, 409: .endpointOccupied]
+        for (status, expectedError) in expected {
             let sig = MockSignalingClient()
             let sut = makeSUT(signaling: sig)
             try await sut.connect(authParams: validAuthParams)
 
             let errorBox = ErrorBox()
-            sut.onError = { errorBox.value = $0 }
+            sut.onDisconnected = { errorBox.value = $0 }
 
-            let info = try JSONEncoder().encode(SocketCloseInfo(httpStatusCode: status))
+            let info = try JSONEncoder().encode(WebSocketCloseInfo(statusCode: status))
             sig.triggerEvent("close", data: info)
             await wait { errorBox.value != nil }
 
             XCTAssertFalse(sut.isConnected, "status \(status)")
             XCTAssertEqual(sig.connectCalledCount, 1, "status \(status) must not be retried")
-            guard case .reconnectFailed = errorBox.value as? BandwidthRTCError else {
-                return XCTFail("Expected reconnectFailed for \(status), got \(String(describing: errorBox.value))")
-            }
+            XCTAssertEqual(errorBox.value as? BandwidthRTCError, expectedError, "status \(status)")
         }
     }
 
@@ -167,7 +166,7 @@ final class ReconnectTests: XCTestCase {
         try await sut.connect(authParams: validAuthParams)
 
         let errorBox = ErrorBox()
-        sut.onError = { errorBox.value = $0 }
+        sut.onDisconnected = { errorBox.value = $0 }
         sig.shouldThrowOnConnect = BandwidthRTCError.connectionFailed("network down")
 
         sig.triggerEvent("close")

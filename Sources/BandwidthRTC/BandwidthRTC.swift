@@ -12,9 +12,16 @@ private let maxReconnectDelay: TimeInterval = 16
 /// disconnected by the same event.
 private let jitterFraction: Double = 0.5
 
-/// Handshake rejections that will recur on every retry, so reconnecting is pointless:
-/// 403 (invalid token) and 409 (the gateway still has this endpoint marked connected).
-private let fatalHandshakeStatusCodes: Set<Int> = [403, 409]
+/// Classify a rejected-handshake HTTP status into the error it represents. 403 (invalid token)
+/// and 409 (the gateway still has this endpoint marked connected) will recur on every retry, so
+/// reconnecting into either is pointless - nil for any other status, including none at all.
+private func classifyFatalHandshake(_ statusCode: Int?) -> BandwidthRTCError? {
+    switch statusCode {
+    case 403: return .invalidToken
+    case 409: return .endpointOccupied
+    default: return nil
+    }
+}
 
 /// Main entry point for the Bandwidth BRTC SDK.
 ///
@@ -45,6 +52,18 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Called when the remote side disconnects (subscribe ICE disconnected/failed).
     public var onRemoteDisconnected: (@Sendable () -> Void)?
 
+    /// Called when the session needs the application's attention because the SDK could not
+    /// repair it by itself. A WebSocket close from anything other than `disconnect()` is not
+    /// reported here on its own - the SDK reconnects with backoff and restores published
+    /// streams first. This fires only for the outcomes that reconnect cannot paper over:
+    /// - `.invalidToken` (HTTP 403) or `.endpointOccupied` (HTTP 409): the gateway refused the
+    ///   handshake for a reason that will keep recurring, so no attempt was retried.
+    ///   `isConnected` is false.
+    /// - `.reconnectFailed`: every retry attempt failed. `isConnected` is false.
+    /// - `.publishFailed`: the socket came back but previously published streams could not be
+    ///   restored. `isConnected` is still true; call `publish()` again.
+    public var onDisconnected: (@Sendable (BandwidthRTCError) -> Void)?
+
     /// Called with Float32 audio samples for visualization after each mic capture or file chunk.
     /// Array contains 480+ samples (10ms+ at 48kHz).
     public var onLocalAudioLevel: (@Sendable ([Float32]) -> Void)?
@@ -53,10 +72,8 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Array contains 480+ samples (10ms+ at 48kHz).
     public var onRemoteAudioLevel: (@Sendable ([Float32]) -> Void)?
 
-    /// Called when the SDK gives up on a session it cannot repair by itself - reconnect attempts
-    /// exhausted or refused, or published streams that could not be restored after a reconnect.
-    /// The session is unusable when this fires with `.reconnectFailed`; `isConnected` is false.
-    public var onError: (@Sendable (Error) -> Void)?
+    /// Called once per DTMF tone queued for local playback on a published stream (see `sendDtmf`).
+    public var onDtmfSent: (@Sendable (DtmfSentEvent) -> Void)?
 
     // MARK: - Internal Components
 
@@ -163,6 +180,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         pcMgr.onStreamUnavailable = { [weak self] streamId in
             self?.onStreamUnavailable?(streamId)
         }
+        pcMgr.onDtmfSent = { [weak self] event in
+            self?.onDtmfSent?(event)
+        }
         pcMgr.onSubscribingIceConnectionStateChange = { [weak self] state in
             Logger.shared.info("Subscribe ICE state changed: \(state.rawValue)")
             if state == .disconnected || state == .failed {
@@ -259,9 +279,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             Logger.shared.debug("WebSocket closed after disconnect() - not reconnecting")
             return
         }
-        if let code = lastCloseStatusCode, fatalHandshakeStatusCodes.contains(code) {
-            Logger.shared.error("Gateway refused the connection (HTTP \(code)) - not reconnecting")
-            failSession(BandwidthRTCError.reconnectFailed("gateway refused the connection (HTTP \(code))"))
+        if let fatal = classifyFatalHandshake(lastCloseStatusCode) {
+            Logger.shared.error("Gateway refused the connection (\(fatal)) - not reconnecting")
+            failSession(fatal)
             return
         }
         guard reconnectTask == nil else { return }
@@ -290,9 +310,11 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             } catch {
                 lastError = error
                 Logger.shared.warn("Reconnect attempt \(attempt) failed: \(error)")
-                if isFatalHandshakeError(error) {
+                if let fatal = fatalHandshakeError(for: error) {
                     Logger.shared.error("Gateway refused the connection - not retrying")
-                    break
+                    await cleanupSession()
+                    onDisconnected?(fatal)
+                    return
                 }
                 delay = min(delay * 2, maxReconnectDelay)
                 continue
@@ -306,36 +328,36 @@ public final class BandwidthRTCClient: @unchecked Sendable {
                 Logger.shared.info("Reconnected")
             } catch {
                 Logger.shared.error("Failed to restore published streams after reconnect: \(error)")
-                onError?(BandwidthRTCError.publishFailed(error.localizedDescription))
+                onDisconnected?(.publishFailed(error.localizedDescription))
             }
             return
         }
 
-        // Reached either by exhausting every attempt or by breaking out of the loop on a
-        // refusal we will not retry, so report the reason rather than assuming exhaustion.
-        Logger.shared.error("Giving up on reconnect: \(lastError)")
+        // Reached by exhausting every attempt; a refusal we will not retry returns from inside
+        // the loop above instead of falling through to here.
+        Logger.shared.error("Reconnect attempts exhausted: \(lastError)")
         await cleanupSession()
-        onError?(BandwidthRTCError.reconnectFailed(lastError.localizedDescription))
+        onDisconnected?(.reconnectFailed(lastError.localizedDescription))
     }
 
     /// Tear the session down and tell the application, for failures we will not retry.
-    private func failSession(_ error: Error) {
+    private func failSession(_ error: BandwidthRTCError) {
         Task { [weak self] in
             await self?.cleanupSession()
-            self?.onError?(error)
+            self?.onDisconnected?(error)
         }
     }
 
     /// Handshake rejections surfaced through the RPC layer rather than the upgrade response.
-    private func isFatalHandshakeError(_ error: Error) -> Bool {
-        if let code = lastCloseStatusCode, fatalHandshakeStatusCodes.contains(code) { return true }
+    private func fatalHandshakeError(for error: Error) -> BandwidthRTCError? {
+        if let fatal = classifyFatalHandshake(lastCloseStatusCode) { return fatal }
         switch error {
         case BandwidthRTCError.invalidToken:
-            return true
+            return .invalidToken
         case BandwidthRTCError.rpcError(let code, _):
-            return fatalHandshakeStatusCodes.contains(code)
+            return classifyFatalHandshake(code)
         default:
-            return false
+            return nil
         }
     }
 
@@ -531,13 +553,16 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         // Handle disconnect
         await signaling.onEvent("close") { [weak self] data in
             guard let self else { return }
-            let status = (try? JSONDecoder().decode(SocketCloseInfo.self, from: data))?.httpStatusCode
+            let status = (try? JSONDecoder().decode(WebSocketCloseInfo.self, from: data))?.statusCode
             Logger.shared.warn("WebSocket closed (status=\(status.map(String.init) ?? "none"))")
             self.isConnected = false
             self.hasActiveCall = false
             self.lastCloseStatusCode = status
             // The peer connections are dead but are kept (along with the audio device and the
-            // retained published streams) until the next attempt resets them.
+            // retained published streams) until the next attempt resets them. handleSocketClosed
+            // decides whether that next attempt happens at all: an application-initiated
+            // disconnect or a fatal handshake status (403/409) skips straight to onDisconnected
+            // instead of reconnecting into a refusal that will only recur.
             self.handleSocketClosed()
         }
     }

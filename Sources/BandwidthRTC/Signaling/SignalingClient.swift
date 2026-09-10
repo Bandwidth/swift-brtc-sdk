@@ -9,10 +9,17 @@ private let sdkVersion = SDKVersion.current
 /// Ping interval in seconds.
 private let pingInterval: TimeInterval = 60
 
-/// Payload delivered to the `close` event handler describing why the socket went away.
-struct SocketCloseInfo: Codable {
-    /// HTTP status of the upgrade response, when the gateway rejected the handshake.
-    let httpStatusCode: Int?
+/// HTTP statuses on a rejected WebSocket handshake that will keep recurring for as long as the
+/// underlying condition holds (e.g. a stale token, or another device holding the endpoint).
+/// Callers should treat these as non-retryable rather than reconnecting.
+private let fatalHandshakeStatusMessages: [Int: String] = [
+    403: "Authentication error: Invalid token",
+    409: "Endpoint already has an active connection from a different device",
+]
+
+/// Payload passed to the "close" event handler describing why the socket closed, when known.
+struct WebSocketCloseInfo: Codable {
+    let statusCode: Int?
 }
 
 /// Actor that manages the WebSocket connection and JSON-RPC signaling with the BRTC gateway.
@@ -335,7 +342,12 @@ actor SignalingClient {
     }
 
     private func handleReceiveError(_ error: Error) {
-        log.error("WebSocket receive error: \(error.localizedDescription)")
+        let statusCode = (webSocket?.response as? HTTPURLResponse)?.statusCode
+        if let statusCode, let fatalMessage = fatalHandshakeStatusMessages[statusCode] {
+            log.error(fatalMessage)
+        } else {
+            log.error("WebSocket receive error: \(error.localizedDescription)")
+        }
         let wasConnected = isConnected
         isConnected = false
 
@@ -346,12 +358,11 @@ actor SignalingClient {
         pendingRequests.removeAll()
 
         if wasConnected {
-            // Notify disconnect handler, carrying the upgrade status when the gateway refused
-            // the handshake (403/409 arrive as an HTTP response, not a WebSocket close frame).
+            // Notify disconnect handler with the classified close reason, if known. The reconnect
+            // loop reads this to decide whether the gateway's refusal is worth retrying at all.
             if let handler = eventHandlers["close"] {
-                let status = (webSocket?.response as? HTTPURLResponse)?.statusCode
-                let info = SocketCloseInfo(httpStatusCode: status)
-                handler((try? JSONEncoder().encode(info)) ?? Data())
+                let closeInfo = WebSocketCloseInfo(statusCode: statusCode)
+                handler((try? JSONEncoder().encode(closeInfo)) ?? Data())
             }
         }
     }

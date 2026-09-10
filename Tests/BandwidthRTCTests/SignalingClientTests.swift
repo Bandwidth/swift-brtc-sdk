@@ -273,4 +273,29 @@ final class SignalingClientTests: XCTestCase {
         let connected = await sut.isConnected
         XCTAssertFalse(connected)
     }
+
+    func testCloseEventCarriesStatusCodeOnRejectedHandshake() async throws {
+        let mockWS = MockWebSocket()
+        let sut = SignalingClient { _ in (mockWS, nil) }
+
+        let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        connectTask.cancel()
+
+        // Another device already holds this endpoint — gateway rejects the handshake with 409.
+        mockWS.response = HTTPURLResponse(url: URL(string: "wss://example.com")!, statusCode: 409, httpVersion: nil, headerFields: nil)
+
+        let closeExpectation = expectation(description: "close event fired")
+        var receivedData: Data?
+        await sut.onEvent("close") { data in
+            receivedData = data
+            closeExpectation.fulfill()
+        }
+
+        mockWS.enqueueError(URLError(.badServerResponse))
+        await fulfillment(of: [closeExpectation], timeout: 2.0)
+
+        let closeInfo = try JSONDecoder().decode(WebSocketCloseInfo.self, from: receivedData ?? Data())
+        XCTAssertEqual(closeInfo.statusCode, 409)
+    }
 }

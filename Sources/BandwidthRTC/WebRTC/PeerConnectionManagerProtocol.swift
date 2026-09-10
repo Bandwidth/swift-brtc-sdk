@@ -6,6 +6,7 @@ protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
     var onStreamAvailable: ((RTCMediaStream, [MediaType], TrackMetadata?) -> Void)? { get set }
     var onStreamUnavailable: ((String) -> Void)? { get set }
     var onSubscribingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)? { get set }
+    var onDtmfSent: ((DtmfSentEvent) -> Void)? { get set }
 
     @discardableResult
     func setupPublishingPeerConnection() throws -> RTCPeerConnection
