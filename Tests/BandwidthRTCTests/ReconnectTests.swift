@@ -134,12 +134,18 @@ final class ReconnectTests: XCTestCase {
         let errorBox = ErrorBox()
         sut.onDisconnected = { errorBox.value = $0 }
 
+        let offersBeforeReconnect = sig.offerSdpCallCount
         sig.shouldThrowOnOfferSdp = BandwidthRTCError.sdpNegotiationFailed("boom")
         sig.offerSdpDelayMs = 50
 
         sig.triggerEvent("close")
-        // Let the attempt get past establishSession() and into the delayed republish offer.
-        try await Task.sleep(nanoseconds: 20_000_000)
+        // Wait for the republish offer itself rather than for a duration - the backoff and any
+        // fixed sleep here expire at roughly the same moment, so a sleep would let the attempt
+        // reach offerSdp after the throw below has already been cleared and quietly succeed on
+        // the first try, passing whether or not the retry works.
+        await wait { sig.offerSdpCallCount == offersBeforeReconnect + 1 }
+        XCTAssertEqual(sig.offerSdpCallCount, offersBeforeReconnect + 1, "republish offer never went out")
+
         // A second close arrives while that offer is still pending.
         sig.triggerEvent("close")
         // Let the retry that follows succeed.
@@ -148,6 +154,8 @@ final class ReconnectTests: XCTestCase {
 
         await wait { sut.isConnected && pcManager.reattachPublishedStreamsCallCount == 2 }
 
+        // Asserted rather than left to wait(), which returns silently on timeout.
+        XCTAssertEqual(pcManager.reattachPublishedStreamsCallCount, 2, "the second close did not trigger another attempt")
         XCTAssertNil(errorBox.value)
         XCTAssertTrue(sut.isConnected)
         await sut.disconnect()
