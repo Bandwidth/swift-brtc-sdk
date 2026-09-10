@@ -121,6 +121,38 @@ final class ReconnectTests: XCTestCase {
         await sut.disconnect()
     }
 
+    /// A close arriving while republish is still in flight must fold into a fresh attempt
+    /// instead of the failing attempt reporting `.publishFailed` on a session that is already
+    /// gone again by the time it fails.
+    func testCloseDuringRepublishRetriesInsteadOfReportingFailure() async throws {
+        let sig = MockSignalingClient()
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(signaling: sig, pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        _ = try await sut.publish()
+
+        let errorBox = ErrorBox()
+        sut.onDisconnected = { errorBox.value = $0 }
+
+        sig.shouldThrowOnOfferSdp = BandwidthRTCError.sdpNegotiationFailed("boom")
+        sig.offerSdpDelayMs = 50
+
+        sig.triggerEvent("close")
+        // Let the attempt get past establishSession() and into the delayed republish offer.
+        try await Task.sleep(nanoseconds: 20_000_000)
+        // A second close arrives while that offer is still pending.
+        sig.triggerEvent("close")
+        // Let the retry that follows succeed.
+        sig.shouldThrowOnOfferSdp = nil
+        sig.offerSdpDelayMs = 0
+
+        await wait { sut.isConnected && pcManager.reattachPublishedStreamsCallCount == 2 }
+
+        XCTAssertNil(errorBox.value)
+        XCTAssertTrue(sut.isConnected)
+        await sut.disconnect()
+    }
+
     // MARK: - Application-initiated disconnect
 
     func testNoReconnectAfterExplicitDisconnect() async throws {

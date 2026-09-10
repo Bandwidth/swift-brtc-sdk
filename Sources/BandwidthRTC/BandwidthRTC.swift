@@ -40,6 +40,10 @@ private final class ReconnectState: @unchecked Sendable {
     /// notices - right before it would otherwise report success - that the session it just
     /// re-established is already gone, instead of silently treating a dead session as healthy.
     private var againRequested = false
+    /// Bumped on every `beginIfIdle` that actually starts a task, so a `finish()` from a task
+    /// that raced its own spawning thread and completed before `stop()` + a fresh `beginIfIdle`
+    /// reassigned `task` cannot nil out that newer task instead of its own, now-stale, slot.
+    private var generation = 0
 
     func setIntentional(_ value: Bool) {
         lock.lock(); defer { lock.unlock() }
@@ -65,22 +69,21 @@ private final class ReconnectState: @unchecked Sendable {
     /// already running, in which case this close is folded into it via `againRequested`
     /// instead of racing a second, competing attempt against the first.
     func beginIfIdle(_ work: @escaping () async -> Void) {
-        lock.lock()
-        guard !intentional else { lock.unlock(); return }
+        lock.lock(); defer { lock.unlock() }
+        guard !intentional else { return }
         guard task == nil else {
             againRequested = true
-            lock.unlock()
             return
         }
-        lock.unlock()
-
-        let newTask = Task { [weak self] in
+        // Task {} only schedules the closure onto the cooperative pool - it never runs
+        // inline - so creating and assigning `task` while still holding the lock cannot
+        // deadlock against `finish()`, which will simply block until this unlocks.
+        generation &+= 1
+        let gen = generation
+        task = Task { [weak self] in
             await work()
-            self?.finish()
+            self?.finish(gen)
         }
-        lock.lock()
-        task = newTask
-        lock.unlock()
     }
 
     /// Checked by the loop right before it would report success, and at the start of each
@@ -92,8 +95,9 @@ private final class ReconnectState: @unchecked Sendable {
         return againRequested
     }
 
-    private func finish() {
+    private func finish(_ gen: Int) {
         lock.lock(); defer { lock.unlock() }
+        guard gen == generation else { return }
         task = nil
     }
 
@@ -443,6 +447,16 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             do {
                 try await republishRetainedStreams()
             } catch {
+                // The most likely reason republish itself throws is the socket dying again
+                // mid-republish - which is exactly when the close handler sets
+                // againRequested rather than scheduling a competing attempt, since this loop
+                // is still marked running. Check for that before telling the application the
+                // session is up but not publishing; it may not be up at all.
+                if reconnectState.consumeAgainRequested() {
+                    Logger.shared.warn("Session dropped again during republish - retrying")
+                    delay = reconnectBaseDelay
+                    continue
+                }
                 Logger.shared.error("Failed to restore published streams after reconnect: \(error)")
                 onDisconnected?(.publishFailed(error.localizedDescription))
                 return
