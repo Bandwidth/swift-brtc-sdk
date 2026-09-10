@@ -258,12 +258,16 @@ actor SignalingClient {
         receiveTask = Task { [weak self] in
             guard let self else { return }
             while !Task.isCancelled {
+                guard let ws = await self.webSocket else { break }
                 do {
-                    guard let ws = await self.webSocket else { break }
                     let message = try await ws.receive()
                     await self.handleMessage(message)
                 } catch {
-                    await self.handleReceiveError(error)
+                    // Pass the socket this specific receive() call was watching, not whatever
+                    // self.webSocket happens to be by the time this catch runs - a stale loop
+                    // whose old socket only just finished tearing down can otherwise land here
+                    // after a newer connect() has already replaced it with a healthy one.
+                    await self.handleReceiveError(error, from: ws)
                     break
                 }
             }
@@ -341,8 +345,12 @@ actor SignalingClient {
         }
     }
 
-    private func handleReceiveError(_ error: Error) {
-        let statusCode = (webSocket?.response as? HTTPURLResponse)?.statusCode
+    private func handleReceiveError(_ error: Error, from socket: any WebSocketProtocol) {
+        guard socket === webSocket else {
+            log.debug("Ignoring receive error from a WebSocket a newer connect() already replaced")
+            return
+        }
+        let statusCode = (socket.response as? HTTPURLResponse)?.statusCode
         if let statusCode, let fatalMessage = fatalHandshakeStatusMessages[statusCode] {
             log.error(fatalMessage)
         } else {

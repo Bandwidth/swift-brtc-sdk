@@ -23,6 +23,95 @@ private func classifyFatalHandshake(_ statusCode: Int?) -> BandwidthRTCError? {
     }
 }
 
+/// Owns the reconnect loop's lifecycle: whether one is running, whether the application asked
+/// to disconnect, and the last close's HTTP status. Guarded by a lock rather than left as plain
+/// vars on `BandwidthRTCClient` because this is the one state that is genuinely touched from
+/// two different, uncoordinated contexts - the WebSocket "close" event, which runs on whatever
+/// executor `SignalingClient`'s receive loop happens to be suspended on, and the application's
+/// `connect()`/`disconnect()` calls, which run on whatever the application calls them from.
+/// `@unchecked Sendable` on the outer class means the compiler will not catch a race here on
+/// its own.
+private final class ReconnectState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+    private var intentional = false
+    private var lastCloseStatusCode: Int?
+    /// Set when the socket drops again while an attempt is already in flight, so that attempt
+    /// notices - right before it would otherwise report success - that the session it just
+    /// re-established is already gone, instead of silently treating a dead session as healthy.
+    private var againRequested = false
+
+    func setIntentional(_ value: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        intentional = value
+    }
+
+    func isIntentional() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return intentional
+    }
+
+    func setLastCloseStatusCode(_ code: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        lastCloseStatusCode = code
+    }
+
+    func getLastCloseStatusCode() -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return lastCloseStatusCode
+    }
+
+    /// Called from the close handler. Starts `work` as the reconnect loop unless one is
+    /// already running, in which case this close is folded into it via `againRequested`
+    /// instead of racing a second, competing attempt against the first.
+    func beginIfIdle(_ work: @escaping () async -> Void) {
+        lock.lock()
+        guard !intentional else { lock.unlock(); return }
+        guard task == nil else {
+            againRequested = true
+            lock.unlock()
+            return
+        }
+        lock.unlock()
+
+        let newTask = Task { [weak self] in
+            await work()
+            self?.finish()
+        }
+        lock.lock()
+        task = newTask
+        lock.unlock()
+    }
+
+    /// Checked by the loop right before it would report success, and at the start of each
+    /// attempt so a close from an earlier, already-retried attempt cannot masquerade as one
+    /// that happened after the current attempt's success. Consumes the flag either way.
+    func consumeAgainRequested() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        defer { againRequested = false }
+        return againRequested
+    }
+
+    private func finish() {
+        lock.lock(); defer { lock.unlock() }
+        task = nil
+    }
+
+    /// Cancel any running reconnect loop and wait for it to fully stop before returning. Task
+    /// cancellation is cooperative - `establishSession()`'s awaits do not observe it on their
+    /// own - so merely requesting cancellation is not enough; the caller needs the old loop
+    /// provably gone before it can safely take over the session itself.
+    func stop() async {
+        lock.lock()
+        let current = task
+        task = nil
+        lock.unlock()
+        guard let current else { return }
+        current.cancel()
+        await current.value
+    }
+}
+
 /// Main entry point for the Bandwidth BRTC SDK.
 ///
 /// Usage:
@@ -92,14 +181,10 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Guards against processing stale SDP offers after hangup.
     private(set) var hasActiveCall = false
 
-    /// Set by `disconnect()` so a socket close the application asked for never triggers a reconnect.
-    private(set) var intentionalDisconnect = false
-
-    /// Guards against overlapping reconnect loops while one is already running.
-    private var reconnectTask: Task<Void, Never>?
-
-    /// HTTP status of the most recent failed upgrade, when the gateway refused the handshake.
-    private var lastCloseStatusCode: Int?
+    /// Owns whether a reconnect is running, whether the application asked to disconnect, and
+    /// the last close's HTTP status. See `ReconnectState` for why this needs real
+    /// synchronization rather than plain vars.
+    private let reconnectState = ReconnectState()
 
     /// First backoff delay, in seconds. Overridable so tests do not have to wait a real second.
     var reconnectBaseDelay: TimeInterval = 1
@@ -132,11 +217,16 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Connect to the BRTC platform using a JWT endpoint token.
     public func connect(authParams: RtcAuthParams, options: RtcOptions? = nil) async throws {
         guard !isConnected else { throw BandwidthRTCError.alreadyConnected }
+        // An application-driven connect() always wins over a stale internal retry - wait for
+        // any in-flight reconnect to fully stop before this one starts building its own
+        // session, so the two can never run establishSession() concurrently against the same
+        // peer connection manager.
+        await reconnectState.stop()
 
         self.options = options
         self.authParams = authParams
-        self.intentionalDisconnect = false
-        self.lastCloseStatusCode = nil
+        reconnectState.setIntentional(false)
+        reconnectState.setLastCloseStatusCode(nil)
 
         try await establishSession()
     }
@@ -156,6 +246,21 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             sig = newSig
         }
 
+        do {
+            try await negotiateSession(sig: sig, authParams: authParams)
+        } catch {
+            // sig.connect() flips SignalingClient's own isConnected before any RPC exchange
+            // happens, so a failure anywhere after that point would otherwise leave it
+            // internally marked connected - poisoning every later attempt, whether a fresh
+            // connect() or the next iteration of the reconnect loop, with an instant
+            // alreadyConnected instead of a real retry. Disconnect it so the same instance
+            // (real, or the injected mock in tests) is clean for whatever tries next.
+            await sig.disconnect()
+            throw error
+        }
+    }
+
+    private func negotiateSession(sig: any SignalingClientProtocol, authParams: RtcAuthParams) async throws {
         // Register event handlers before connecting
         await registerEventHandlers(on: sig)
 
@@ -251,9 +356,14 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
     /// Disconnect from the BRTC platform.
     public func disconnect() async {
-        intentionalDisconnect = true
-        reconnectTask?.cancel()
-        reconnectTask = nil
+        reconnectState.setIntentional(true)
+        // Wait for a running reconnect to fully stop before tearing the session down -
+        // cancellation alone does not stop it, since its awaits inside establishSession() do
+        // not observe cancellation on their own. Without this a reconnect that was already
+        // mid-attempt can finish after cleanupSession() runs and resurrect the connection this
+        // call was meant to end, firing a spurious onReady on a session the application was
+        // just told is gone.
+        await reconnectState.stop()
         await self.cleanupSession()
         Logger.shared.info("Disconnected from BRTC")
     }
@@ -275,19 +385,20 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
     /// Decide what to do about a websocket that closed without the application asking.
     private func handleSocketClosed() {
-        guard !intentionalDisconnect else {
+        guard !reconnectState.isIntentional() else {
             Logger.shared.debug("WebSocket closed after disconnect() - not reconnecting")
             return
         }
-        if let fatal = classifyFatalHandshake(lastCloseStatusCode) {
+        if let fatal = classifyFatalHandshake(reconnectState.getLastCloseStatusCode()) {
             Logger.shared.error("Gateway refused the connection (\(fatal)) - not reconnecting")
             failSession(fatal)
             return
         }
-        guard reconnectTask == nil else { return }
-        reconnectTask = Task { [weak self] in
+        // If a reconnect is already running, this close is folded into it (it will notice and
+        // loop again right before it would otherwise report success) rather than racing a
+        // second, competing attempt against the first.
+        reconnectState.beginIfIdle { [weak self] in
             await self?.reconnect()
-            self?.reconnectTask = nil
         }
     }
 
@@ -301,10 +412,16 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             // instance within the same sweep, so without it they all wake and retry in lockstep.
             let jittered = delay + Double.random(in: 0...(delay * jitterFraction))
             try? await Task.sleep(nanoseconds: UInt64(jittered * 1_000_000_000))
-            if intentionalDisconnect || Task.isCancelled { return }
+            if reconnectState.isIntentional() || Task.isCancelled { return }
+
+            // Discard any "again requested" left over from a close during backoff or a prior,
+            // already-retried failed attempt - it does not describe this attempt yet, and
+            // leaving it set would make the check below after a real success fire on a stale
+            // signal instead of a fresh one.
+            _ = reconnectState.consumeAgainRequested()
 
             Logger.shared.info("Reconnect attempt \(attempt)/\(maxReconnectAttempts)")
-            lastCloseStatusCode = nil
+            reconnectState.setLastCloseStatusCode(nil)
             do {
                 try await establishSession()
             } catch {
@@ -325,12 +442,24 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             // being retried into a 409 from the gateway.
             do {
                 try await republishRetainedStreams()
-                Logger.shared.info("Reconnected")
             } catch {
                 Logger.shared.error("Failed to restore published streams after reconnect: \(error)")
                 onDisconnected?(.publishFailed(error.localizedDescription))
+                return
             }
-            return
+
+            // A close can arrive between establishSession() succeeding and here - the "close"
+            // event fires as soon as the socket drops, which can be before republish even
+            // finishes - fast enough that handleSocketClosed()'s "already running" check would
+            // otherwise fold it into this same attempt and never schedule anything to fix the
+            // session it describes. Check the flag it left rather than assuming the session
+            // that was healthy a moment ago still is.
+            guard reconnectState.consumeAgainRequested() else {
+                Logger.shared.info("Reconnected")
+                return
+            }
+            Logger.shared.warn("Session dropped again before reconnect could finish - retrying")
+            delay = reconnectBaseDelay
         }
 
         // Reached by exhausting every attempt; a refusal we will not retry returns from inside
@@ -349,16 +478,14 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     }
 
     /// Handshake rejections surfaced through the RPC layer rather than the upgrade response.
+    /// The only source of a fatal classification today is `lastCloseStatusCode`, an HTTP status
+    /// on the upgrade response - a JSON-RPC error code from a later call, if the gateway ever
+    /// sends one for the same condition, is a different numbering scheme entirely and is not
+    /// comparable against it, so this does not attempt to guess at one.
     private func fatalHandshakeError(for error: Error) -> BandwidthRTCError? {
-        if let fatal = classifyFatalHandshake(lastCloseStatusCode) { return fatal }
-        switch error {
-        case BandwidthRTCError.invalidToken:
-            return .invalidToken
-        case BandwidthRTCError.rpcError(let code, _):
-            return classifyFatalHandshake(code)
-        default:
-            return nil
-        }
+        if let fatal = classifyFatalHandshake(reconnectState.getLastCloseStatusCode()) { return fatal }
+        if case BandwidthRTCError.invalidToken = error { return .invalidToken }
+        return nil
     }
 
     /// Re-attach every retained published stream to the new publishing peer connection and
@@ -368,12 +495,16 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             throw BandwidthRTCError.notConnected
         }
 
-        try await pcManager.waitForPublishIceConnected()
-
+        // reattachPublishedStreams() only calls the peer connection's own local add(track:) -
+        // no network call, no precondition on ICE state - so it is safe to run before waiting
+        // for anything and cheap enough to use as the no-op check itself. Only the renegotiation
+        // below needs the gateway's side of the peer connection to be connected first.
         guard pcManager.reattachPublishedStreams() > 0 else {
             Logger.shared.debug("Nothing published - skipping republish")
             return
         }
+
+        try await pcManager.waitForPublishIceConnected()
 
         let localOffer = try await pcManager.createPublishOffer()
         let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
@@ -557,7 +688,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             Logger.shared.warn("WebSocket closed (status=\(status.map(String.init) ?? "none"))")
             self.isConnected = false
             self.hasActiveCall = false
-            self.lastCloseStatusCode = status
+            self.reconnectState.setLastCloseStatusCode(status)
             // The peer connections are dead but are kept (along with the audio device and the
             // retained published streams) until the next attempt resets them. handleSocketClosed
             // decides whether that next attempt happens at all: an application-initiated

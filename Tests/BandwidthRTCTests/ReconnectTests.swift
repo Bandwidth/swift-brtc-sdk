@@ -135,7 +135,6 @@ final class ReconnectTests: XCTestCase {
 
         XCTAssertFalse(sut.isConnected)
         XCTAssertEqual(sig.connectCalledCount, 1)
-        XCTAssertTrue(sut.intentionalDisconnect)
     }
 
     // MARK: - Fatal handshake rejections
