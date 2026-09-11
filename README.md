@@ -87,9 +87,29 @@ class CallService {
 | `onReady` | Gateway signals the endpoint is ready to receive calls |
 | `onStreamAvailable` | A remote participant begins streaming audio |
 | `onStreamUnavailable` | A remote participant stops streaming |
-| `onDisconnected` | WebSocket connection dropped unexpectedly |
+| `onRemoteDisconnected` | The remote side went away mid-call |
+| `onDisconnected` | The session needs your attention and could not be repaired automatically (see Reconnecting) |
 | `onLocalAudioLevel` | Per-chunk Float32 mic samples (for visualization) |
 | `onRemoteAudioLevel` | Per-chunk Float32 remote playout samples (for visualization) |
+
+---
+
+## Reconnecting
+
+If the gateway closes the websocket for any reason other than your own `disconnect()` call, the
+SDK reconnects on its own with exponential backoff (1s, doubling to a 16s ceiling, up to six
+attempts, jittered so clients dropped by the same event do not all retry in lockstep). Published
+streams are retained across the drop and re-attached to the new publishing peer connection with a
+single renegotiation, so an endpoint that was eligible for calls before the drop is eligible again
+afterwards. None of this reaches `onDisconnected` - it only fires once recovery is no longer
+possible:
+
+- **`.invalidToken` (HTTP 403) or `.endpointOccupied` (HTTP 409)** - the gateway refused the
+  handshake for a reason that will keep recurring, so no attempt is retried. `isConnected` is
+  false; call `connect()` again with a fresh token or once the other device is gone.
+- **`.reconnectFailed`** - every attempt failed. `isConnected` is false; call `connect()` again.
+- **`.publishFailed`** - the socket came back but the retained streams could not be restored.
+  `isConnected` is still true; call `publish()` again yourself.
 
 ---
 

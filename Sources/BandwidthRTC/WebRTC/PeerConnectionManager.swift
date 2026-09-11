@@ -45,6 +45,10 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     // ICE connected flag — used to await publish PC readiness before offerSdp
     private(set) var publishIceConnected = false
 
+    /// Whether a retained track can be re-attached as-is. A seam for tests, which have no way to
+    /// synthesize an ended local audio track.
+    var isTrackLive: (RTCMediaStreamTrack) -> Bool = { $0.readyState == .live }
+
     // MARK: - Init
 
     init(options: RtcOptions?, audioDevice: (any RTCAudioDevice)? = nil) {
@@ -597,13 +601,19 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     // MARK: - Cleanup
 
     func cleanup() {
-        stopAudioStatsLogging()
+        closePeerConnections()
 
         // Stop all tracks
         for (_, stream) in publishedStreams {
             for track in stream.audioTracks { track.isEnabled = false }
         }
         publishedStreams.removeAll()
+        log.info("Peer connections cleaned up")
+    }
+
+    /// Close the current peer connections and data channels, leaving published streams retained.
+    private func closePeerConnections() {
+        stopAudioStatsLogging()
         subscribedTrackMetadata.removeAll()
 
         for dc in [publishHeartbeatDC, publishDiagnosticsDC, subscribeHeartbeatDC, subscribeDiagnosticsDC].compactMap({ $0 }) {
@@ -621,7 +631,49 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         subscribingPC = nil
 
         subscribeSdpRevision = 0
-        log.info("Peer connections cleaned up")
+        publishIceConnected = false
+    }
+
+    /// Discard the dead peer connections and build fresh ones for a reconnect, keeping the
+    /// factory, audio device, and retained published streams.
+    func resetPeerConnections() throws {
+        closePeerConnections()
+        try setupPublishingPeerConnection()
+        try setupSubscribingPeerConnection()
+        log.info("Peer connections reset for reconnect")
+    }
+
+    /// Re-attach every retained published stream to the current publishing peer connection.
+    /// Returns the number of streams re-attached - zero when nothing was ever published, which
+    /// lets the caller skip renegotiation entirely on a first connect.
+    @discardableResult
+    func reattachPublishedStreams() -> Int {
+        guard let pc = publishingPC else { return 0 }
+
+        for (streamId, stream) in publishedStreams {
+            for track in stream.audioTracks {
+                let liveTrack: RTCAudioTrack
+                if isTrackLive(track) {
+                    liveTrack = track
+                } else {
+                    // A track that ended while disconnected produces a sender that never sends
+                    // RTP, so the gateway never sees media even though the SDP looks correct.
+                    // Re-acquire it from the factory instead of re-attaching the dead one.
+                    log.info("Re-acquiring ended audio track \(track.trackId)")
+                    let source = factory.audioSource(with: nil)
+                    liveTrack = factory.audioTrack(with: source, trackId: track.trackId)
+                    stream.removeAudioTrack(track)
+                    stream.addAudioTrack(liveTrack)
+                }
+                liveTrack.isEnabled = true
+                pc.add(liveTrack, streamIds: [streamId])
+            }
+        }
+
+        if !publishedStreams.isEmpty {
+            log.info("Re-attached \(publishedStreams.count) published stream(s)")
+        }
+        return publishedStreams.count
     }
 
 }
