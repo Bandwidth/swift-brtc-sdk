@@ -16,6 +16,7 @@ public enum BandwidthRTCError: Error, LocalizedError, Equatable {
     case rpcError(code: Int, message: String)
     case notSupported(String)
     case noActiveCall
+    case reconnectFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -45,6 +46,8 @@ public enum BandwidthRTCError: Error, LocalizedError, Equatable {
             return "Operation not supported: \(detail)"
         case .noActiveCall:
             return "No active call to answer or end"
+        case .reconnectFailed(let detail):
+            return "Reconnect failed: \(detail)"
         }
     }
 }

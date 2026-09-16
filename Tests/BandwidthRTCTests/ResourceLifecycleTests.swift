@@ -90,7 +90,7 @@ final class ResourceLifecycleTests: XCTestCase {
 
     // MARK: - Close Event Cleanup
 
-    func testCloseEventCleansUpPeerConnectionManager() async throws {
+    func testCloseEventMarksDisconnectedAndRetainsManagerForReconnect() async throws {
         let sig = MockSignalingClient()
         let pcManager = MockPeerConnectionManager()
         let sut = makeSUT(signaling: sig, pcManager: pcManager)
@@ -100,20 +100,12 @@ final class ResourceLifecycleTests: XCTestCase {
         try await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertFalse(sut.isConnected)
-        XCTAssertTrue(pcManager.cleanupCalled)
-        XCTAssertNil(sut.peerConnectionManager)
+        // The manager (and its retained published streams) is kept so the reconnect can
+        // reset its peer connections rather than build a whole new one.
+        XCTAssertFalse(pcManager.cleanupCalled)
+        XCTAssertNotNil(sut.peerConnectionManager)
     }
 
-    func testCloseEventNilsMixingDevice() async throws {
-        let sig = MockSignalingClient()
-        let sut = makeSUT(signaling: sig)
-        try await sut.connect(authParams: validAuthParams)
-
-        sig.triggerEvent("close")
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        XCTAssertNil(sut.mixingDevice)
-    }
 
     func testCloseEventWith409ReportsEndpointOccupied() async throws {
         let sig = MockSignalingClient()
@@ -146,9 +138,11 @@ final class ResourceLifecycleTests: XCTestCase {
         XCTAssertEqual(reported, .invalidToken)
     }
 
-    func testCloseEventWithNoStatusCodeReportsWebSocketDisconnected() async throws {
+    func testCloseEventWithNoStatusCodeReconnectsInsteadOfReportingImmediately() async throws {
         let sig = MockSignalingClient()
         let sut = makeSUT(signaling: sig)
+        // Long enough that the reconnect loop is still asleep on its first attempt when we assert.
+        sut.reconnectBaseDelay = 10
         try await sut.connect(authParams: validAuthParams)
 
         var reported: BandwidthRTCError?
@@ -157,7 +151,10 @@ final class ResourceLifecycleTests: XCTestCase {
         sig.triggerEvent("close")
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        XCTAssertEqual(reported, .webSocketDisconnected)
+        // Unlike 403/409, an unclassified close is not a reason to give up - the SDK retries
+        // it first (see ReconnectTests) and only reports through onDisconnected if that fails.
+        XCTAssertNil(reported)
+        XCTAssertFalse(sut.isConnected)
     }
 
     func testOperationsAfterCloseEventFail() async throws {

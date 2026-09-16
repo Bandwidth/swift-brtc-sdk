@@ -40,9 +40,14 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     var onStreamUnavailable: ((String) -> Void)?
     var onPublishingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)?
     var onSubscribingIceConnectionStateChange: ((RTCIceConnectionState) -> Void)?
+    var onDtmfSent: ((DtmfSentEvent) -> Void)?
 
     // ICE connected flag — used to await publish PC readiness before offerSdp
     private(set) var publishIceConnected = false
+
+    /// Whether a retained track can be re-attached as-is. A seam for tests, which have no way to
+    /// synthesize an ended local audio track.
+    var isTrackLive: (RTCMediaStreamTrack) -> Bool = { $0.readyState == .live }
 
     // MARK: - Init
 
@@ -434,11 +439,13 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
 
     // MARK: - DTMF
 
+    private static let validDtmfTones = Set("0123456789ABCDabcd#*")
+
     func sendDtmf(_ tone: String, duration: Int, interToneGap: Int) {
         guard let pc = publishingPC else { return }
 
         for sender in pc.senders {
-            guard sender.track?.kind == "audio", let dtmfSender = sender.dtmfSender else { continue }
+            guard let track = sender.track, track.kind == "audio", let dtmfSender = sender.dtmfSender else { continue }
             // Skip senders that aren't ready (e.g. telephone-event not yet negotiated) and keep
             // scanning — bailing here would silently drop DTMF when a not-ready sender comes first.
             guard dtmfSender.canInsertDtmf else { continue }
@@ -448,6 +455,15 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
                 interToneGap: TimeInterval(interToneGap) / 1000.0
             )
             log.debug("Sent DTMF: \(tone) (duration: \(duration)ms, interToneGap: \(interToneGap)ms)")
+
+            if let streamId = publishedStreams.first(where: { $0.value.audioTracks.contains { $0.trackId == track.trackId } })?.key {
+                // insertDtmf is fire-and-forget with no completion signal from WebRTC, so this
+                // reports tones as queued rather than as actually played (unlike the browser's
+                // native "tonechange" event, which iOS WebRTC has no equivalent for).
+                for character in tone where Self.validDtmfTones.contains(character) {
+                    onDtmfSent?(DtmfSentEvent(tone: String(character), streamId: streamId))
+                }
+            }
             return
         }
         log.warn("No ready DTMF sender found for DTMF")
@@ -585,13 +601,19 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     // MARK: - Cleanup
 
     func cleanup() {
-        stopAudioStatsLogging()
+        closePeerConnections()
 
         // Stop all tracks
         for (_, stream) in publishedStreams {
             for track in stream.audioTracks { track.isEnabled = false }
         }
         publishedStreams.removeAll()
+        log.info("Peer connections cleaned up")
+    }
+
+    /// Close the current peer connections and data channels, leaving published streams retained.
+    private func closePeerConnections() {
+        stopAudioStatsLogging()
         subscribedTrackMetadata.removeAll()
 
         for dc in [publishHeartbeatDC, publishDiagnosticsDC, subscribeHeartbeatDC, subscribeDiagnosticsDC].compactMap({ $0 }) {
@@ -609,7 +631,49 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         subscribingPC = nil
 
         subscribeSdpRevision = 0
-        log.info("Peer connections cleaned up")
+        publishIceConnected = false
+    }
+
+    /// Discard the dead peer connections and build fresh ones for a reconnect, keeping the
+    /// factory, audio device, and retained published streams.
+    func resetPeerConnections() throws {
+        closePeerConnections()
+        try setupPublishingPeerConnection()
+        try setupSubscribingPeerConnection()
+        log.info("Peer connections reset for reconnect")
+    }
+
+    /// Re-attach every retained published stream to the current publishing peer connection.
+    /// Returns the number of streams re-attached - zero when nothing was ever published, which
+    /// lets the caller skip renegotiation entirely on a first connect.
+    @discardableResult
+    func reattachPublishedStreams() -> Int {
+        guard let pc = publishingPC else { return 0 }
+
+        for (streamId, stream) in publishedStreams {
+            for track in stream.audioTracks {
+                let liveTrack: RTCAudioTrack
+                if isTrackLive(track) {
+                    liveTrack = track
+                } else {
+                    // A track that ended while disconnected produces a sender that never sends
+                    // RTP, so the gateway never sees media even though the SDP looks correct.
+                    // Re-acquire it from the factory instead of re-attaching the dead one.
+                    log.info("Re-acquiring ended audio track \(track.trackId)")
+                    let source = factory.audioSource(with: nil)
+                    liveTrack = factory.audioTrack(with: source, trackId: track.trackId)
+                    stream.removeAudioTrack(track)
+                    stream.addAudioTrack(liveTrack)
+                }
+                liveTrack.isEnabled = true
+                pc.add(liveTrack, streamIds: [streamId])
+            }
+        }
+
+        if !publishedStreams.isEmpty {
+            log.info("Re-attached \(publishedStreams.count) published stream(s)")
+        }
+        return publishedStreams.count
     }
 
 }
