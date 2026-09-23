@@ -32,10 +32,26 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     public private(set) var sourceNode: AVAudioSourceNode?
     private var micConverter: AVAudioConverter?
 
+    // MARK: - CallKit manual activation
+
+    private let manualAudioSessionActivation: Bool
+
+    /// Whether the `AVAudioSession` is currently active. Always `true` unless
+    /// `manualAudioSessionActivation` is enabled, in which case it tracks CallKit's
+    /// activation state via `sessionDidActivate()`/`sessionDidDeactivate()`.
+    public private(set) var isSessionActive: Bool
+
     // MARK: - Init
 
-    public init(audioOptions: AudioProcessingOptions = AudioProcessingOptions()) {
+    /// - Parameter isSessionActive: Seeds the initial activation state when
+    ///   `audioOptions.manualAudioSessionActivation` is enabled. `BandwidthRTCClient` passes
+    ///   its own tracked activation state here, since CallKit's `didActivate` can arrive
+    ///   before this device is created (e.g. an incoming call answered from the lock screen).
+    ///   Ignored when manual activation is disabled — the session is then always active.
+    public init(audioOptions: AudioProcessingOptions = AudioProcessingOptions(), isSessionActive: Bool = false) {
         self.audioOptions = audioOptions
+        self.manualAudioSessionActivation = audioOptions.manualAudioSessionActivation
+        self.isSessionActive = audioOptions.manualAudioSessionActivation ? isSessionActive : true
         super.init()
     }
 
@@ -95,7 +111,9 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
             try session.setCategory(.playAndRecord, mode: audioOptions.audioSessionMode, options: audioOptions.audioSessionCategoryOptions)
             let ioDuration = audioOptions.preferredIOBufferDuration ?? (audioOptions.useLowLatency ? 0.005 : 0.01)
             try session.setPreferredIOBufferDuration(ioDuration)
-            try session.setActive(true)
+            if !manualAudioSessionActivation {
+                try session.setActive(true)
+            }
         } catch {
             log.error("AVAudioSession config failed: \(error)")
         }
@@ -140,8 +158,10 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     public func startPlayout() -> Bool {
         isPlaying = true
-        startEngineIfNeeded()
-        installPlayoutTap()
+        if isSessionActive {
+            startEngineIfNeeded()
+            installPlayoutTap()
+        }
         log.debug("Playout started")
         return true
     }
@@ -156,7 +176,9 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     // MARK: - RTCAudioDevice: Recording
 
     public func initializeRecording() -> Bool {
-        installMicTap()
+        if isSessionActive {
+            installMicTap()
+        }
         isRecordingInitialized = true
         log.debug("Recording initialized")
         return true
@@ -164,7 +186,9 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     public func startRecording() -> Bool {
         isRecording = true
-        startEngineIfNeeded()
+        if isSessionActive {
+            startEngineIfNeeded()
+        }
         log.debug("Recording started")
         return true
     }
@@ -173,6 +197,42 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
         isRecording = false
         log.debug("Recording stopped")
         return true
+    }
+
+    // MARK: - CallKit Manual Session Activation
+
+    /// Call when `manualAudioSessionActivation` is enabled and CallKit has activated the
+    /// `AVAudioSession` (`CXProviderDelegate.provider(_:didActivate:)`, forwarded via
+    /// `BandwidthRTCClient.audioSessionDidActivate`). Starts the engine and installs
+    /// whichever taps `initializeRecording()`/`startPlayout()` deferred. No-op if manual
+    /// activation is disabled.
+    public func sessionDidActivate() {
+        guard manualAudioSessionActivation else { return }
+        isSessionActive = true
+        if isRecordingInitialized {
+            installMicTap()
+        }
+        startEngineIfNeeded()
+        if isPlaying {
+            installPlayoutTap()
+        }
+        log.debug("AudioDevice session activated")
+    }
+
+    /// Call when `manualAudioSessionActivation` is enabled and CallKit has deactivated the
+    /// `AVAudioSession` (`CXProviderDelegate.provider(_:didDeactivate:)`, forwarded via
+    /// `BandwidthRTCClient.audioSessionDidDeactivate`). Stops the engine and removes taps,
+    /// but keeps `isPlaying`/`isRecording` so a later activation resumes automatically.
+    /// No-op if manual activation is disabled.
+    public func sessionDidDeactivate() {
+        guard manualAudioSessionActivation else { return }
+        isSessionActive = false
+        engine.inputNode.removeTap(onBus: 0)
+        engine.mainMixerNode.removeTap(onBus: 0)
+        if engine.isRunning {
+            engine.stop()
+        }
+        log.debug("AudioDevice session deactivated")
     }
 
     // MARK: - Private: AVAudioEngine Setup
@@ -192,6 +252,10 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     /// Called when the audio hardware is reconfigured.
     /// The engine's I/O cycle may have been abandoned; force a stop/restart to restore it.
     private func handleEngineConfigurationChange() {
+        guard isSessionActive else {
+            log.debug("[BRTC] AVAudioEngineConfigurationChange ignored — session inactive")
+            return
+        }
         log.warn("[BRTC] AVAudioEngineConfigurationChange — restarting engine")
         engine.stop()
         // Remove stale taps before restarting to avoid double-tap overload
