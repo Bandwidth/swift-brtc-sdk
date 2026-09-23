@@ -8,7 +8,7 @@ let package = Package(
         .library(name: "BandwidthRTC", type: .dynamic, targets: ["BandwidthRTC"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/stasel/WebRTC.git", exact: "114.0.0"),
+        .package(url: "https://github.com/stasel/WebRTC.git", exact: "153.0.0"),
     ],
     targets: [
         .plugin(
