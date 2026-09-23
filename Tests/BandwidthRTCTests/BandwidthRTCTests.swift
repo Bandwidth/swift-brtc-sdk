@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 @testable import BandwidthRTC
 
 final class BandwidthRTCTests: XCTestCase {
@@ -431,6 +432,39 @@ final class BandwidthRTCTests: XCTestCase {
         // Give the async closure a tick to run
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertFalse(sut.isConnected)
+    }
+
+    // MARK: - CallKit Integration
+
+    func testAudioSessionDidActivateBeforeConnectDoesNotCrash() {
+        // Simulates an incoming call answered from the lock screen: CallKit's didActivate
+        // can fire before connect() has created a MixingAudioDevice.
+        let sut = BandwidthRTCClient(signaling: nil, peerConnectionManager: nil, audioDevice: nil)
+        sut.audioSessionDidActivate(AVAudioSession.sharedInstance())
+        XCTAssertTrue(sut.isAudioSessionActive)
+    }
+
+    func testAudioSessionDidDeactivateBeforeConnectDoesNotCrash() {
+        let sut = BandwidthRTCClient(signaling: nil, peerConnectionManager: nil, audioDevice: nil)
+        sut.audioSessionDidDeactivate(AVAudioSession.sharedInstance())
+        XCTAssertFalse(sut.isAudioSessionActive)
+    }
+
+    // Note: unlike sessionDidDeactivate(), sessionDidActivate() unconditionally calls
+    // AVAudioEngine.start() — which requires real audio hardware and crashes on the
+    // Simulator (see MixingAudioDeviceTests' note on startPlayout()/startRecording()).
+    // Its forwarding is covered by testAudioSessionDidActivateBeforeConnectDoesNotCrash
+    // (client-side state) and MixingAudioDeviceTests' manual-activation tests
+    // (device-side gating); the two are not exercised together here for that reason.
+
+    func testAudioSessionDidDeactivateForwardsToMixingDevice() {
+        let options = AudioProcessingOptions(manualAudioSessionActivation: true)
+        let device = MixingAudioDevice(audioOptions: options, isSessionActive: true)
+        let sut = BandwidthRTCClient(signaling: nil, peerConnectionManager: nil, audioDevice: device)
+
+        sut.audioSessionDidDeactivate(AVAudioSession.sharedInstance())
+        XCTAssertFalse(sut.isAudioSessionActive)
+        XCTAssertFalse(device.isSessionActive)
     }
 }
 

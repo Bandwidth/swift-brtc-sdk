@@ -308,6 +308,74 @@ final class MixingAudioDeviceTests: XCTestCase {
         XCTAssertTrue(mock.terminateDevice())
     }
 
+    // MARK: - Manual Audio Session Activation (CallKit)
+
+    func testDefaultModeSessionIsAlwaysActive() {
+        let sut = makeSUT()
+        XCTAssertTrue(sut.isSessionActive, "Session should be considered active by default (non-CallKit mode)")
+    }
+
+    func testManualModeDefaultsToInactiveSession() {
+        let options = AudioProcessingOptions(manualAudioSessionActivation: true)
+        let sut = MixingAudioDevice(audioOptions: options)
+        XCTAssertFalse(sut.isSessionActive, "Manual mode should start inactive until CallKit activates")
+    }
+
+    func testManualModeSeedsActiveStateFromConstructor() {
+        // Simulates an incoming call answered from the lock screen: CallKit's didActivate
+        // fires before connect() creates the device, so BandwidthRTCClient seeds the flag.
+        let options = AudioProcessingOptions(manualAudioSessionActivation: true)
+        let sut = MixingAudioDevice(audioOptions: options, isSessionActive: true)
+        XCTAssertTrue(sut.isSessionActive)
+    }
+
+    func testIsSessionActiveConstructorParamIgnoredWhenNotManual() {
+        // Non-manual mode is always active regardless of what's passed in.
+        let sut = MixingAudioDevice(audioOptions: AudioProcessingOptions(), isSessionActive: false)
+        XCTAssertTrue(sut.isSessionActive)
+    }
+
+    func testManualModeStartPlayoutDoesNotStartEngineWhileInactive() {
+        let options = AudioProcessingOptions(manualAudioSessionActivation: true)
+        let sut = MixingAudioDevice(audioOptions: options)
+        _ = sut.initializePlayout()
+        let result = sut.startPlayout()
+        XCTAssertTrue(result)
+        XCTAssertTrue(sut.isPlaying, "Flag should still flip so activation can resume playout later")
+        XCTAssertFalse(sut.engine.isRunning, "Engine must not start until CallKit activates the session")
+    }
+
+    func testManualModeStartRecordingDoesNotStartEngineWhileInactive() {
+        let options = AudioProcessingOptions(manualAudioSessionActivation: true)
+        let sut = MixingAudioDevice(audioOptions: options)
+        _ = sut.initializeRecording()
+        let result = sut.startRecording()
+        XCTAssertTrue(result)
+        XCTAssertTrue(sut.isRecording)
+        XCTAssertFalse(sut.engine.isRunning, "Engine must not start until CallKit activates the session")
+    }
+
+    func testSessionDidActivateIsNoOpWhenNotManualMode() {
+        let sut = makeSUT()
+        XCTAssertTrue(sut.isSessionActive)
+        sut.sessionDidActivate()
+        XCTAssertTrue(sut.isSessionActive, "Non-manual devices ignore CallKit hooks entirely")
+    }
+
+    func testSessionDidDeactivateIsNoOpWhenNotManualMode() {
+        let sut = makeSUT()
+        sut.sessionDidDeactivate()
+        XCTAssertTrue(sut.isSessionActive, "Non-manual devices ignore CallKit hooks entirely")
+    }
+
+    func testSessionDidDeactivateWithoutPriorActivationIsSafe() {
+        let options = AudioProcessingOptions(manualAudioSessionActivation: true)
+        let sut = MixingAudioDevice(audioOptions: options)
+        sut.sessionDidDeactivate()
+        XCTAssertFalse(sut.isSessionActive)
+        XCTAssertFalse(sut.engine.isRunning)
+    }
+
     // MARK: - MockMixingAudioDevice Tests (ensures mock stays in sync)
 
     func testMockAudioDeviceDefaultValues() {

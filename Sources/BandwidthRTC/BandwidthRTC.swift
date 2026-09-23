@@ -193,6 +193,13 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// First backoff delay, in seconds. Overridable so tests do not have to wait a real second.
     var reconnectBaseDelay: TimeInterval = 1
 
+    /// Whether the CallKit-managed `AVAudioSession` is currently active.
+    /// Stored on the client rather than `MixingAudioDevice` because CallKit's `didActivate`
+    /// can arrive before `connect()` creates a device — e.g. an incoming call answered from
+    /// the lock screen. Only meaningful when `AudioProcessingOptions.manualAudioSessionActivation`
+    /// is enabled; otherwise unused.
+    private(set) var isAudioSessionActive = false
+
     // No pending SDP offers — both are answered during connect() init.
 
     // MARK: - Init
@@ -345,7 +352,10 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
 
         // Create the custom ADM - it owns audio session config, mic capture, and playout
-        let mixing = MixingAudioDevice(audioOptions: options?.audioProcessing ?? AudioProcessingOptions())
+        let mixing = MixingAudioDevice(
+            audioOptions: options?.audioProcessing ?? AudioProcessingOptions(),
+            isSessionActive: isAudioSessionActive
+        )
         mixing.onLocalAudioLevel = { [weak self] samples in self?.onLocalAudioLevel?(samples) }
         mixing.onRemoteAudioLevel = { [weak self] samples in self?.onRemoteAudioLevel?(samples) }
         self.mixingDevice = mixing
@@ -662,6 +672,25 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Set the SDK log level.
     public func setLogLevel(_ level: LogLevel) {
         Logger.shared.level = level
+    }
+
+    // MARK: - CallKit Integration
+
+    /// Forward from `CXProviderDelegate.provider(_:didActivate:)` when using
+    /// `AudioProcessingOptions.manualAudioSessionActivation`. Starts the audio engine and
+    /// resumes whichever taps are pending on the current `MixingAudioDevice`, if one exists.
+    public func audioSessionDidActivate(_ session: AVAudioSession) {
+        isAudioSessionActive = true
+        mixingDevice?.sessionDidActivate()
+    }
+
+    /// Forward from `CXProviderDelegate.provider(_:didDeactivate:)` when using
+    /// `AudioProcessingOptions.manualAudioSessionActivation`. Stops the audio engine on the
+    /// current `MixingAudioDevice`, if one exists, without releasing the session itself —
+    /// CallKit owns that.
+    public func audioSessionDidDeactivate(_ session: AVAudioSession) {
+        isAudioSessionActive = false
+        mixingDevice?.sessionDidDeactivate()
     }
 
     // MARK: - Private: Event Handlers
