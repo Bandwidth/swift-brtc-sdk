@@ -45,6 +45,23 @@ final class AsyncMutexTests: XCTestCase {
         XCTAssertTrue(ran)
     }
 
+    func testHeavyContentionNeverLosesAWakeup() async {
+        // Regression: lock() once checked isLocked and enqueued in separate critical sections,
+        // so an unlock() between them stranded the waiter. A later lock user would wake it, so
+        // each trial races only two callers: a stranded waiter then hangs and trips the timeout.
+        let mutex = AsyncMutex()
+        let done = expectation(description: "all critical sections finished")
+        Task.detached {
+            for _ in 0..<50_000 {
+                async let first: Void = mutex.withLock {}
+                async let second: Void = mutex.withLock {}
+                _ = await (first, second)
+            }
+            done.fulfill()
+        }
+        await fulfillment(of: [done], timeout: 30)
+    }
+
     func testWaitersAreServedInOrder() async {
         let mutex = AsyncMutex()
 
