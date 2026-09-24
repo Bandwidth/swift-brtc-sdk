@@ -1,0 +1,95 @@
+import XCTest
+@testable import BandwidthRTC
+
+/// Tests for `AsyncMutex`, the lock backing `BandwidthRTCClient`'s publish-side serialization.
+final class AsyncMutexTests: XCTestCase {
+
+    func testWithLockSerializesConcurrentAccess() async {
+        let mutex = AsyncMutex()
+        let counter = Counter()
+
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<50 {
+                group.addTask {
+                    await mutex.withLock {
+                        // A non-atomic read-increment-write: if withLock ever let two callers
+                        // in at once, at least one increment would be lost.
+                        let current = await counter.value
+                        try? await Task.sleep(nanoseconds: 1_000_000)
+                        await counter.set(current + 1)
+                    }
+                }
+            }
+        }
+
+        let finalValue = await counter.value
+        XCTAssertEqual(finalValue, 50)
+    }
+
+    func testWithLockReleasesEvenWhenBodyThrows() async {
+        struct Boom: Error {}
+        let mutex = AsyncMutex()
+
+        do {
+            try await mutex.withLock { throw Boom() }
+            XCTFail("Expected Boom to propagate")
+        } catch is Boom {
+            // expected
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+
+        // A second acquisition must not hang - the failed body's defer should have unlocked.
+        var ran = false
+        await mutex.withLock { ran = true }
+        XCTAssertTrue(ran)
+    }
+
+    func testLockAndUnlockCanBeCalledFromDifferentSuspensionPoints() async {
+        // Mirrors how unpublish() uses the mutex: acquire, do some work, release explicitly
+        // (not via withLock), await something unrelated, then re-acquire.
+        let mutex = AsyncMutex()
+        await mutex.lock()
+        mutex.unlock()
+
+        try? await Task.sleep(nanoseconds: 1_000_000)
+
+        var ran = false
+        await mutex.withLock { ran = true }
+        XCTAssertTrue(ran)
+    }
+
+    func testWaitersAreServedInOrder() async {
+        let mutex = AsyncMutex()
+        await mutex.lock()
+
+        let order = OrderTracker()
+        var tasks: [Task<Void, Never>] = []
+        for i in 0..<5 {
+            tasks.append(Task {
+                await mutex.withLock {
+                    await order.append(i)
+                }
+            })
+            // Give each task a chance to enqueue before starting the next, so arrival order is
+            // deterministic.
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        mutex.unlock()
+        for task in tasks { await task.value }
+
+        let recorded = await order.values
+        XCTAssertEqual(recorded, [0, 1, 2, 3, 4])
+    }
+}
+
+private actor Counter {
+    private(set) var value = 0
+    func set(_ newValue: Int) { value = newValue }
+}
+
+private actor OrderTracker {
+    private(set) var values: [Int] = []
+    func append(_ value: Int) { values.append(value) }
+}
