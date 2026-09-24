@@ -20,6 +20,11 @@ final class MockWebSocket: @unchecked Sendable, WebSocketProtocol {
     /// Settable so tests can simulate a rejected handshake (e.g. HTTP 403/409).
     var response: URLResponse?
 
+    /// Settable so tests can simulate the server's close frame code (e.g. 1001 Going Away).
+    /// Defaults to `.invalid`, matching a real socket that never received a close frame at all
+    /// (e.g. a raw network drop).
+    var closeCode: URLSessionWebSocketTask.CloseCode = .invalid
+
     // MARK: - WebSocketProtocol
 
     func resume() {
