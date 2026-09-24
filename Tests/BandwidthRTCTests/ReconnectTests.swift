@@ -20,6 +20,12 @@ final class ReconnectTests: XCTestCase {
 
     private let validAuthParams = RtcAuthParams(endpointToken: "test-token")
 
+    /// Encodes a "close" payload with the one retryable close code (1001, Going Away) - everything
+    /// else tears the session down without retrying (see CloseCodePolicyTests).
+    private func retryableClose() -> Data {
+        (try? JSONEncoder().encode(WebSocketCloseInfo(closeCode: 1001))) ?? Data()
+    }
+
     /// Poll until `condition` holds or the timeout expires.
     private func wait(timeout: TimeInterval = 2, for condition: @escaping () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
@@ -49,7 +55,7 @@ final class ReconnectTests: XCTestCase {
         let sut = makeSUT(signaling: sig, pcManager: pcManager)
         try await sut.connect(authParams: validAuthParams)
 
-        sig.triggerEvent("close")
+        sig.triggerEvent("close", data: retryableClose())
         await wait { sut.isConnected }
 
         XCTAssertTrue(sut.isConnected)
@@ -71,7 +77,7 @@ final class ReconnectTests: XCTestCase {
         _ = try await sut.publish()
         XCTAssertEqual(sig.offerSdpCallCount, 2)
 
-        sig.triggerEvent("close")
+        sig.triggerEvent("close", data: retryableClose())
         await wait { sut.isConnected }
 
         XCTAssertTrue(sut.isConnected)
@@ -88,7 +94,7 @@ final class ReconnectTests: XCTestCase {
         try await sut.connect(authParams: validAuthParams)
 
         for expectedConnects in 2...4 {
-            sig.triggerEvent("close")
+            sig.triggerEvent("close", data: retryableClose())
             await wait { sig.connectCalledCount == expectedConnects && sut.isConnected }
             XCTAssertEqual(sig.connectCalledCount, expectedConnects)
         }
@@ -112,7 +118,7 @@ final class ReconnectTests: XCTestCase {
         sut.onDisconnected = { errorBox.value = $0 }
         sig.shouldThrowOnOfferSdp = BandwidthRTCError.sdpNegotiationFailed("boom")
 
-        sig.triggerEvent("close")
+        sig.triggerEvent("close", data: retryableClose())
         await wait { errorBox.value != nil }
 
         guard case .publishFailed = errorBox.value as? BandwidthRTCError else {
@@ -138,7 +144,7 @@ final class ReconnectTests: XCTestCase {
         sig.shouldThrowOnOfferSdp = BandwidthRTCError.sdpNegotiationFailed("boom")
         sig.offerSdpDelayMs = 50
 
-        sig.triggerEvent("close")
+        sig.triggerEvent("close", data: retryableClose())
         // Wait for the republish offer itself rather than for a duration - the backoff and any
         // fixed sleep here expire at roughly the same moment, so a sleep would let the attempt
         // reach offerSdp after the throw below has already been cleared and quietly succeed on
@@ -147,7 +153,7 @@ final class ReconnectTests: XCTestCase {
         XCTAssertEqual(sig.offerSdpCallCount, offersBeforeReconnect + 1, "republish offer never went out")
 
         // A second close arrives while that offer is still pending.
-        sig.triggerEvent("close")
+        sig.triggerEvent("close", data: retryableClose())
         // Let the retry that follows succeed.
         sig.shouldThrowOnOfferSdp = nil
         sig.offerSdpDelayMs = 0
@@ -199,6 +205,63 @@ final class ReconnectTests: XCTestCase {
         }
     }
 
+    // MARK: - Close code policy (VAPI-3917, mirrors JS commit 541c123)
+
+    /// 1000 (endpoint gone), 4409 (superseded by a newer connection from this device), 1011
+    /// (internal error), and an unrecognized code all tear the session down without retrying -
+    /// only 1001 means "come back on this session".
+    func testNonRetryableCloseCodesTearDownWithoutRetrying() async throws {
+        for code in [1000, 4409, 1011, 4000] {
+            let sig = MockSignalingClient()
+            let sut = makeSUT(signaling: sig)
+            try await sut.connect(authParams: validAuthParams)
+
+            let errorBox = ErrorBox()
+            sut.onDisconnected = { errorBox.value = $0 }
+
+            let info = try JSONEncoder().encode(WebSocketCloseInfo(closeCode: code))
+            sig.triggerEvent("close", data: info)
+            await wait { errorBox.value != nil }
+
+            XCTAssertFalse(sut.isConnected, "code \(code)")
+            XCTAssertEqual(sig.connectCalledCount, 1, "code \(code) must not be retried")
+            XCTAssertEqual(errorBox.value as? BandwidthRTCError, .nonRetryableClose(code), "code \(code)")
+        }
+    }
+
+    /// A close with no code at all (e.g. the socket dropped without a close frame, such as a raw
+    /// network loss) is treated the same as an unrecognized code - non-retryable - matching the
+    /// JS SDK's default of only special-casing 1001 (rpc-websockets/browsers report an abnormal
+    /// closure as 1006, which is likewise outside the JS SDK's single-code retry set).
+    func testCloseWithNoCodeTearsDownWithoutRetrying() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        let errorBox = ErrorBox()
+        sut.onDisconnected = { errorBox.value = $0 }
+
+        sig.triggerEvent("close")
+        await wait { errorBox.value != nil }
+
+        XCTAssertFalse(sut.isConnected)
+        XCTAssertEqual(sig.connectCalledCount, 1)
+        XCTAssertEqual(errorBox.value as? BandwidthRTCError, .nonRetryableClose(nil))
+    }
+
+    func testGoingAwayCloseCodeRetries() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        sig.triggerEvent("close", data: retryableClose())
+        await wait { sig.connectCalledCount == 2 && sut.isConnected }
+
+        XCTAssertTrue(sut.isConnected)
+        XCTAssertEqual(sig.connectCalledCount, 2)
+        await sut.disconnect()
+    }
+
     func testExhaustedReconnectTearsDownAndReportsError() async throws {
         let sig = MockSignalingClient()
         let sut = makeSUT(signaling: sig)
@@ -208,7 +271,7 @@ final class ReconnectTests: XCTestCase {
         sut.onDisconnected = { errorBox.value = $0 }
         sig.shouldThrowOnConnect = BandwidthRTCError.connectionFailed("network down")
 
-        sig.triggerEvent("close")
+        sig.triggerEvent("close", data: retryableClose())
         await wait(timeout: 5) { errorBox.value != nil }
 
         XCTAssertFalse(sut.isConnected)
@@ -278,6 +341,28 @@ final class ReconnectTests: XCTestCase {
         XCTAssertEqual(senderTracks.count, 1)
         XCTAssertTrue(senderTracks[0].isEqual(replacement))
         XCTAssertFalse(senderTracks[0].isEqual(endedTrack))
+    }
+
+    /// Mirrors the JS SDK's republishStreams skipping a stream that was unpublished mid-reconnect
+    /// (JS commit 3227406). Swift's reattach loop has no `await` inside it (unlike JS's
+    /// getUserMedia-based re-acquisition), so there's no race window during the loop itself -
+    /// this just confirms that a stream removed before reattach runs is not resurrected by it.
+    func testReattachSkipsStreamRemovedWhileDisconnected() throws {
+        let manager = PeerConnectionManager(options: nil, audioDevice: nil)
+        defer { manager.cleanup() }
+        try manager.setupPublishingPeerConnection()
+
+        let stream1 = manager.addLocalTracks(audio: true)
+        let stream2 = manager.addLocalTracks(audio: true)
+
+        try manager.resetPeerConnections()
+
+        // stream1 was unpublished while the session was down.
+        XCTAssertTrue(manager.removeLocalTracks(streamId: stream1.streamId))
+
+        XCTAssertEqual(manager.reattachPublishedStreams(), 1)
+        let senderTrackIds = manager.publishingPC?.senders.compactMap { $0.track?.trackId } ?? []
+        XCTAssertEqual(senderTrackIds, [stream2.audioTracks[0].trackId])
     }
 
     func testReattachWithNothingPublishedReturnsZero() throws {

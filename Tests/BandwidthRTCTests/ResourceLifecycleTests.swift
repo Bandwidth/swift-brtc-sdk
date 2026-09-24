@@ -96,7 +96,9 @@ final class ResourceLifecycleTests: XCTestCase {
         let sut = makeSUT(signaling: sig, pcManager: pcManager)
         try await sut.connect(authParams: validAuthParams)
 
-        sig.triggerEvent("close")
+        // 1001 (Going Away) is the one close code that reconnects instead of tearing down.
+        let data = try JSONEncoder().encode(WebSocketCloseInfo(closeCode: 1001))
+        sig.triggerEvent("close", data: data)
         try await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertFalse(sut.isConnected)
@@ -138,7 +140,26 @@ final class ResourceLifecycleTests: XCTestCase {
         XCTAssertEqual(reported, .invalidToken)
     }
 
-    func testCloseEventWithNoStatusCodeReconnectsInsteadOfReportingImmediately() async throws {
+    func testCloseEventWithNoCloseCodeTearsDownWithoutRetrying() async throws {
+        let sig = MockSignalingClient()
+        let sut = makeSUT(signaling: sig)
+        try await sut.connect(authParams: validAuthParams)
+
+        var reported: BandwidthRTCError?
+        sut.onDisconnected = { reported = $0 }
+
+        // No close frame at all (e.g. a raw network drop) - like every code other than 1001,
+        // this is not retried; it reports immediately instead of looping into the same failure.
+        sig.triggerEvent("close")
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(reported, .nonRetryableClose(nil))
+        XCTAssertFalse(sut.isConnected)
+        XCTAssertNil(sut.peerConnectionManager)
+        XCTAssertEqual(sig.connectCalledCount, 1, "a non-retryable close must not be retried")
+    }
+
+    func testCloseEventWithGoingAwayReconnectsInsteadOfReportingImmediately() async throws {
         let sig = MockSignalingClient()
         let sut = makeSUT(signaling: sig)
         // Long enough that the reconnect loop is still asleep on its first attempt when we assert.
@@ -148,11 +169,12 @@ final class ResourceLifecycleTests: XCTestCase {
         var reported: BandwidthRTCError?
         sut.onDisconnected = { reported = $0 }
 
-        sig.triggerEvent("close")
+        // 1001 (Going Away) is not a reason to give up - the SDK retries it first (see
+        // ReconnectTests) and only reports through onDisconnected if that fails.
+        let data = try JSONEncoder().encode(WebSocketCloseInfo(closeCode: 1001))
+        sig.triggerEvent("close", data: data)
         try await Task.sleep(nanoseconds: 50_000_000)
 
-        // Unlike 403/409, an unclassified close is not a reason to give up - the SDK retries
-        // it first (see ReconnectTests) and only reports through onDisconnected if that fails.
         XCTAssertNil(reported)
         XCTAssertFalse(sut.isConnected)
     }
