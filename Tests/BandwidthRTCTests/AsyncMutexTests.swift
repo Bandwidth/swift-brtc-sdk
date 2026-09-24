@@ -45,23 +45,18 @@ final class AsyncMutexTests: XCTestCase {
         XCTAssertTrue(ran)
     }
 
-    func testLockAndUnlockCanBeCalledFromDifferentSuspensionPoints() async {
-        // Mirrors how unpublish() uses the mutex: acquire, do some work, release explicitly
-        // (not via withLock), await something unrelated, then re-acquire.
-        let mutex = AsyncMutex()
-        await mutex.lock()
-        mutex.unlock()
-
-        try? await Task.sleep(nanoseconds: 1_000_000)
-
-        var ran = false
-        await mutex.withLock { ran = true }
-        XCTAssertTrue(ran)
-    }
-
     func testWaitersAreServedInOrder() async {
         let mutex = AsyncMutex()
-        await mutex.lock()
+
+        // Hold the lock until the stream yields, so every task below has to queue.
+        var release: AsyncStream<Void>.Continuation!
+        let releaseSignal = AsyncStream<Void> { release = $0 }
+        let holder = Task {
+            await mutex.withLock {
+                for await _ in releaseSignal { break }
+            }
+        }
+        try? await Task.sleep(nanoseconds: 5_000_000)
 
         let order = OrderTracker()
         var tasks: [Task<Void, Never>] = []
@@ -76,7 +71,8 @@ final class AsyncMutexTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
 
-        mutex.unlock()
+        release.yield()
+        await holder.value
         for task in tasks { await task.value }
 
         let recorded = await order.values

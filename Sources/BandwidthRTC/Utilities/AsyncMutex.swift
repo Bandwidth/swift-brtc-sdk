@@ -1,40 +1,43 @@
 import Foundation
 
-/// A FIFO mutex usable across `await` suspension points.
+/// A FIFO mutex whose critical section can span `await` suspension points.
 ///
-/// `NSLock` cannot be held across an `await` (a suspended task would block whichever thread
-/// happens to resume it, not just its own), and an actor's own isolation can't be released
-/// mid-method the way `unpublish` needs to (it must drop this lock while it polls for the
-/// publish peer to reconnect - a wait that can take up to 10s - so a concurrent `publish()` or
-/// gateway ICE-restart offer is not blocked for that long). This provides `lock()`/`unlock()` as
-/// separate, ordinary calls so a caller can release the lock from the middle of an async
-/// function instead of only at the end of a `withLock` block.
+/// Publish-side negotiation (create offer, send it to the gateway, apply the answer) suspends
+/// between steps and must not interleave with another negotiation on the same peer connection.
+/// `NSLock` cannot be held across an `await`, and an actor does not help because actors are
+/// reentrant at every `await`.
 final class AsyncMutex: @unchecked Sendable {
     private let state = NSLock()
     private var isLocked = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
+    /// Runs `body` while holding the lock, unlocking afterward even if `body` throws.
+    func withLock<T>(_ body: () async throws -> T) async rethrows -> T {
+        await lock()
+        defer { unlock() }
+        return try await body()
+    }
+
     /// Suspends until the lock is free, then takes it.
-    func lock() async {
-        let mustWait: Bool = {
-            state.lock(); defer { state.unlock() }
-            if isLocked {
-                return true
-            }
-            isLocked = true
-            return false
-        }()
-        guard mustWait else { return }
-        await withCheckedContinuation { continuation in
+    private func lock() async {
+        // Check and enqueue under one critical section so an unlock() cannot slip in between
+        // and leave this waiter parked forever.
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             state.lock()
-            waiters.append(continuation)
-            state.unlock()
+            if isLocked {
+                waiters.append(continuation)
+                state.unlock()
+            } else {
+                isLocked = true
+                state.unlock()
+                continuation.resume()
+            }
         }
     }
 
     /// Releases the lock, handing it directly to the next waiter (if any) rather than letting a
     /// new `lock()` call race it for the freed slot.
-    func unlock() {
+    private func unlock() {
         state.lock()
         if waiters.isEmpty {
             isLocked = false
@@ -44,12 +47,5 @@ final class AsyncMutex: @unchecked Sendable {
             state.unlock()
             next.resume()
         }
-    }
-
-    /// Runs `body` while holding the lock, unlocking afterward even if `body` throws.
-    func withLock<T>(_ body: () async throws -> T) async rethrows -> T {
-        await lock()
-        defer { unlock() }
-        return try await body()
     }
 }
