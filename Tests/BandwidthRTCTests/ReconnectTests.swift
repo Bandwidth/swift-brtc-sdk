@@ -26,8 +26,11 @@ final class ReconnectTests: XCTestCase {
         (try? JSONEncoder().encode(WebSocketCloseInfo(closeCode: 1001))) ?? Data()
     }
 
-    /// Poll until `condition` holds or the timeout expires.
-    private func wait(timeout: TimeInterval = 2, for condition: @escaping () -> Bool) async {
+    /// Poll until `condition` holds or the timeout expires. The default is generous rather than
+    /// tight: it only bounds how long a genuinely failing case takes to surface, not how long a
+    /// passing one takes (which returns as soon as `condition` holds) - a loaded CI runner can
+    /// stretch the mock's own delays and Task scheduling well past what a fast local run sees.
+    private func wait(timeout: TimeInterval = 10, for condition: @escaping () -> Bool) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
             if condition() { return }

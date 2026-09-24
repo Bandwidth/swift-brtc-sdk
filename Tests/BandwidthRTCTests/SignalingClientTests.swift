@@ -268,7 +268,10 @@ final class SignalingClientTests: XCTestCase {
 
         // Inject a receive error to simulate WebSocket drop
         mockWS.enqueueError(URLError(.networkConnectionLost))
-        await fulfillment(of: [closeExpectation], timeout: 2.0)
+        // The error is queued regardless of when the receive loop actually starts, so this only
+        // needs to be generous enough for a loaded CI runner to schedule that loop at all - not
+        // a measure of how long the loop itself takes to run.
+        await fulfillment(of: [closeExpectation], timeout: 10.0)
 
         let connected = await sut.isConnected
         XCTAssertFalse(connected)
