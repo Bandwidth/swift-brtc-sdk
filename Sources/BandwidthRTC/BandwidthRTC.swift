@@ -23,6 +23,13 @@ private func classifyFatalHandshake(_ statusCode: Int?) -> BandwidthRTCError? {
     }
 }
 
+/// WebSocket close codes that mean "reconnect this same session" - mirrors the JS SDK's default
+/// (only 1001, Going Away). Every other code - 1000 (endpoint gone), 4409 (superseded by a newer
+/// connection from this device), 1011 (internal error), one this SDK doesn't recognize, or none
+/// at all (e.g. a network drop that never delivered a close frame) - tears the session down
+/// instead of retrying it.
+private let retryableCloseCodes: Set<Int> = [1001]
+
 /// Owns the reconnect loop's lifecycle: whether one is running, whether the application asked
 /// to disconnect, and the last close's HTTP status. Guarded by a lock rather than left as plain
 /// vars on `BandwidthRTCClient` because this is the one state that is genuinely touched from
@@ -36,6 +43,7 @@ private final class ReconnectState: @unchecked Sendable {
     private var task: Task<Void, Never>?
     private var intentional = false
     private var lastCloseStatusCode: Int?
+    private var lastCloseCode: Int?
     /// Set when the socket drops again while an attempt is already in flight, so that attempt
     /// notices - right before it would otherwise report success - that the session it just
     /// re-established is already gone, instead of silently treating a dead session as healthy.
@@ -63,6 +71,16 @@ private final class ReconnectState: @unchecked Sendable {
     func getLastCloseStatusCode() -> Int? {
         lock.lock(); defer { lock.unlock() }
         return lastCloseStatusCode
+    }
+
+    func setLastCloseCode(_ code: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        lastCloseCode = code
+    }
+
+    func getLastCloseCode() -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        return lastCloseCode
     }
 
     /// Called from the close handler. Starts `work` as the reconnect loop unless one is
@@ -190,6 +208,13 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// synchronization rather than plain vars.
     private let reconnectState = ReconnectState()
 
+    /// Serializes everything that touches the publishing peer connection's transceivers and
+    /// negotiation state: `publish()`'s attach+negotiate, `unpublish()`'s track removal and
+    /// renegotiation, `republishRetainedStreams()`, and a gateway-initiated ICE-restart offer on
+    /// the publish side. Without this, e.g. an unpublish racing a publish could renegotiate
+    /// before the new track is attached, or remove a transceiver mid-offer.
+    private let publishLock = AsyncMutex()
+
     /// First backoff delay, in seconds. Overridable so tests do not have to wait a real second.
     var reconnectBaseDelay: TimeInterval = 1
 
@@ -231,6 +256,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         self.authParams = authParams
         reconnectState.setIntentional(false)
         reconnectState.setLastCloseStatusCode(nil)
+        reconnectState.setLastCloseCode(nil)
 
         try await establishSession()
     }
@@ -398,6 +424,15 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             failSession(fatal)
             return
         }
+        let closeCode = reconnectState.getLastCloseCode()
+        guard let closeCode, retryableCloseCodes.contains(closeCode) else {
+            // Only 1001 means "come back on this session". Everything else - including no close
+            // frame at all - means retrying would just recreate the same failure, so tear down
+            // and let the application (or a fresh connect()) decide what to do next.
+            Logger.shared.error("WebSocket closed with non-retryable close code \(closeCode.map(String.init) ?? "none") - not reconnecting")
+            failSession(.nonRetryableClose(closeCode))
+            return
+        }
         // If a reconnect is already running, this close is folded into it (it will notice and
         // loop again right before it would otherwise report success) rather than racing a
         // second, competing attempt against the first.
@@ -426,6 +461,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
             Logger.shared.info("Reconnect attempt \(attempt)/\(maxReconnectAttempts)")
             reconnectState.setLastCloseStatusCode(nil)
+            reconnectState.setLastCloseCode(nil)
             do {
                 try await establishSession()
             } catch {
@@ -512,17 +548,23 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         // reattachPublishedStreams() only calls the peer connection's own local add(track:) -
         // no network call, no precondition on ICE state - so it is safe to run before waiting
         // for anything and cheap enough to use as the no-op check itself. Only the renegotiation
-        // below needs the gateway's side of the peer connection to be connected first.
-        guard pcManager.reattachPublishedStreams() > 0 else {
+        // below needs the gateway's side of the peer connection to be connected first. Runs
+        // under publishLock so it can't interleave with a concurrent publish()/unpublish().
+        let attachedCount = await publishLock.withLock { pcManager.reattachPublishedStreams() }
+        guard attachedCount > 0 else {
             Logger.shared.debug("Nothing published - skipping republish")
             return
         }
 
+        // Release the lock while waiting: this can take up to 10s and would otherwise block
+        // publish(), unpublish(), and a gateway ICE-restart offer for that long.
         try await pcManager.waitForPublishIceConnected()
 
-        let localOffer = try await pcManager.createPublishOffer()
-        let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
-        try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
+        try await publishLock.withLock {
+            let localOffer = try await pcManager.createPublishOffer()
+            let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
+            try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
+        }
         Logger.shared.info("Republished retained streams")
     }
 
@@ -542,20 +584,26 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         try await pcManager.waitForPublishIceConnected()
         Logger.shared.debug("Publish PC ICE connected — proceeding with publish")
 
-        // 2. Add local audio track to the publishing peer connection
-        let mediaStream = pcManager.addLocalTracks(audio: audio)
+        // Adding the track, creating the offer, and applying the answer all have to happen
+        // atomically: an unpublish() (or a gateway ICE-restart offer) racing in between could
+        // otherwise remove a transceiver mid-offer, or renegotiate before this track is attached.
+        let mediaStream = try await publishLock.withLock { () -> RTCMediaStream in
+            // 2. Add local audio track to the publishing peer connection
+            let mediaStream = pcManager.addLocalTracks(audio: audio)
 
-        // 3. Create a client-initiated offer with the newly added tracks
-        let localOffer = try await pcManager.createPublishOffer()
-        Logger.shared.debug("Created publish offer with local tracks")
+            // 3. Create a client-initiated offer with the newly added tracks
+            let localOffer = try await pcManager.createPublishOffer()
+            Logger.shared.debug("Created publish offer with local tracks")
 
-        // 4. Send the offer to the server via offerSdp — server returns an SDP answer
-        let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
-        Logger.shared.debug("Server answered publish offer")
+            // 4. Send the offer to the server via offerSdp — server returns an SDP answer
+            let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
+            Logger.shared.debug("Server answered publish offer")
 
-        // 5. Apply the server's answer as remote description, and our offer as local description
-        try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
-        Logger.shared.debug("Publish SDP exchange complete")
+            // 5. Apply the server's answer as remote description, and our offer as local description
+            try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
+            Logger.shared.debug("Publish SDP exchange complete")
+            return mediaStream
+        }
 
         var mediaTypes: [MediaType] = []
         if audio { mediaTypes.append(.audio) }
@@ -568,17 +616,47 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Unpublish a previously published stream.
     /// Removes the stream's tracks from the publish peer connection and renegotiates with the server.
     public func unpublish(stream: RtcStream) async throws {
-        guard isConnected, let pcManager = peerConnectionManager, let signalingClient = signaling else {
+        guard let pcManager = peerConnectionManager else {
+            // Never connected at all - there is nothing local to stop either.
             throw BandwidthRTCError.notConnected
         }
 
-        // Remove the stream's tracks from the publish PC
-        pcManager.removeLocalTracks(streamId: stream.streamId)
+        guard isConnected, let signalingClient = signaling else {
+            // Disconnected (e.g. a reconnect attempt is in flight): the publish peer connection
+            // is dead and there is no signaling channel to renegotiate over, but the stream's
+            // tracks are still a local resource and should stop like any other unpublish.
+            // Removing it here also keeps a later republish from re-attaching it.
+            await publishLock.withLock {
+                pcManager.removeLocalTracks(streamId: stream.streamId)
+            }
+            Logger.shared.info("Unpublished stream \(stream.streamId) locally (not connected - skipping renegotiation)")
+            return
+        }
 
-        // Renegotiate: create a new offer without the removed tracks
-        let localOffer = try await pcManager.createPublishOffer()
-        let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
-        try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
+        // Stop local media first, under the lock, so unpublish takes effect even if
+        // renegotiation below fails. An id that matches nothing published is a no-op - skip
+        // renegotiating for a stream that was never there.
+        let removed = await publishLock.withLock {
+            pcManager.removeLocalTracks(streamId: stream.streamId)
+        }
+        guard removed else {
+            Logger.shared.warn("unpublish: stream \(stream.streamId) is not currently published")
+            return
+        }
+
+        do {
+            // The gateway rejects offers until the publish peer is connected again. Wait
+            // outside the lock so a gateway-initiated ICE restart or a concurrent publish() is
+            // not blocked - this wait can take up to 10s.
+            try await pcManager.waitForPublishIceConnected()
+            try await publishLock.withLock {
+                let localOffer = try await pcManager.createPublishOffer()
+                let result = try await signalingClient.offerSdp(sdpOffer: localOffer, peerType: "publish")
+                try await pcManager.applyPublishAnswer(localOffer: localOffer, remoteAnswer: result.sdpAnswer)
+            }
+        } catch {
+            throw BandwidthRTCError.unpublishRenegotiationFailed("\(error)")
+        }
 
         Logger.shared.info("Unpublished stream \(stream.streamId)")
     }
@@ -667,11 +745,11 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     // MARK: - Private: Event Handlers
 
     private func registerEventHandlers(on signaling: any SignalingClientProtocol) async {
-        // Handle incoming SDP offers for subscribing
+        // Handle incoming SDP offers, routed by peerType (see handleSdpOffer).
         await signaling.onEvent("sdpOffer") { [weak self] data in
             guard let self else { return }
             Task {
-                await self.handleSubscribeSdpOffer(data)
+                await self.handleSdpOffer(data)
             }
         }
 
@@ -698,11 +776,14 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         // Handle disconnect
         await signaling.onEvent("close") { [weak self] data in
             guard let self else { return }
-            let status = (try? JSONDecoder().decode(WebSocketCloseInfo.self, from: data))?.statusCode
-            Logger.shared.warn("WebSocket closed (status=\(status.map(String.init) ?? "none"))")
+            let info = try? JSONDecoder().decode(WebSocketCloseInfo.self, from: data)
+            let status = info?.statusCode
+            let closeCode = info?.closeCode
+            Logger.shared.warn("WebSocket closed (status=\(status.map(String.init) ?? "none"), closeCode=\(closeCode.map(String.init) ?? "none"))")
             self.isConnected = false
             self.hasActiveCall = false
             self.reconnectState.setLastCloseStatusCode(status)
+            self.reconnectState.setLastCloseCode(closeCode)
             // The peer connections are dead but are kept (along with the audio device and the
             // retained published streams) until the next attempt resets them. handleSocketClosed
             // decides whether that next attempt happens at all: an application-initiated
@@ -712,8 +793,12 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
     }
 
-    private func handleSubscribeSdpOffer(_ data: Data) async {
-        Logger.shared.debug(">>> Subscribe SDP offer received (\(data.count) bytes)")
+    /// Routes a gateway "sdpOffer" notification by `peerType`: `"publish"` is a gateway-initiated
+    /// ICE restart on the publishing connection (the gateway owns ICE restart end-to-end - the
+    /// SDK never initiates one itself); anything else, including a missing `peerType` for older
+    /// gateways, is the existing subscribe renegotiation.
+    private func handleSdpOffer(_ data: Data) async {
+        Logger.shared.debug(">>> SDP offer received (\(data.count) bytes)")
 
         guard hasActiveCall else {
             Logger.shared.info("Ignoring SDP offer — no active call (post-hangup)")
@@ -721,22 +806,34 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
 
         guard let pcManager = peerConnectionManager, let sig = signaling else {
-            Logger.shared.error("Subscribe SDP offer received but pcManager or signaling is nil")
+            Logger.shared.error("SDP offer received but pcManager or signaling is nil")
             return
         }
 
+        let notification: SDPOfferNotification
         do {
-            let notification: SDPOfferNotification
-            do {
-                notification = try JSONDecoder().decode(SDPOfferNotification.self, from: data)
-            } catch {
-                let rawPreview = String(data: data, encoding: .utf8).map { String($0.prefix(500)) } ?? "binary"
-                Logger.shared.error("Failed to decode SDPOfferNotification: \(error)")
-                Logger.shared.error("Raw data preview: \(rawPreview)")
-                return
-            }
+            notification = try JSONDecoder().decode(SDPOfferNotification.self, from: data)
+        } catch {
+            let rawPreview = String(data: data, encoding: .utf8).map { String($0.prefix(500)) } ?? "binary"
+            Logger.shared.error("Failed to decode SDPOfferNotification: \(error)")
+            Logger.shared.error("Raw data preview: \(rawPreview)")
+            return
+        }
 
-            Logger.shared.debug("Subscribe SDP offer: revision=\(notification.sdpRevision.map(String.init) ?? "nil"), peerType=\(notification.peerType ?? "nil"), endpointId=\(notification.endpointId ?? "nil"), metadata keys=\(notification.trackMetadata?.keys.joined(separator: ",") ?? "none")")
+        if notification.peerType == "publish" {
+            await handlePublishSdpOffer(notification, pcManager: pcManager, sig: sig)
+        } else {
+            await handleSubscribeSdpOffer(notification, pcManager: pcManager, sig: sig)
+        }
+    }
+
+    private func handleSubscribeSdpOffer(
+        _ notification: SDPOfferNotification,
+        pcManager: any PeerConnectionManagerProtocol,
+        sig: any SignalingClientProtocol
+    ) async {
+        do {
+            Logger.shared.debug("Subscribe SDP offer: revision=\(notification.sdpRevision.map(String.init) ?? "nil"), endpointId=\(notification.endpointId ?? "nil"), metadata keys=\(notification.trackMetadata?.keys.joined(separator: ",") ?? "none")")
 
             let answerSdp = try await pcManager.handleSubscribeSdpOffer(
                 sdpOffer: notification.sdpOffer,
@@ -749,6 +846,34 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             Logger.shared.debug("<<< Subscribe SDP answer sent (revision=\(notification.sdpRevision.map(String.init) ?? "auto"))")
         } catch {
             Logger.shared.error("Failed to handle subscribe SDP offer: \(error)")
+        }
+    }
+
+    /// A gateway-initiated ICE restart on the publishing connection (see `handleSdpOffer`). Runs
+    /// under `publishLock` so it can't interleave with `publish()`/`unpublish()`'s own
+    /// negotiations against the same peer connection.
+    private func handlePublishSdpOffer(
+        _ notification: SDPOfferNotification,
+        pcManager: any PeerConnectionManagerProtocol,
+        sig: any SignalingClientProtocol
+    ) async {
+        do {
+            Logger.shared.debug("Publish SDP offer: revision=\(notification.sdpRevision.map(String.init) ?? "nil"), endpointId=\(notification.endpointId ?? "nil")")
+
+            let answerSdp = try await publishLock.withLock {
+                try await pcManager.handlePublishSdpOffer(
+                    sdpOffer: notification.sdpOffer,
+                    sdpRevision: notification.sdpRevision
+                )
+            }
+
+            try await sig.answerSdp(sdpAnswer: answerSdp, peerType: "publish")
+
+            Logger.shared.debug("<<< Publish SDP answer sent (revision=\(notification.sdpRevision.map(String.init) ?? "auto"))")
+        } catch {
+            // A failed ICE-restart answer leaves publish media down, unlike a dropped subscribe
+            // renegotiation, so this is logged as an error rather than debug.
+            Logger.shared.error("Failed to handle publish SDP offer: \(error)")
         }
     }
 }

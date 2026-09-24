@@ -115,6 +115,22 @@ final class PeerConnectionManagerTests: XCTestCase {
         }
     }
 
+    func testHandlePublishSdpOfferThrowsIfPCNil() async {
+        // publishingPC is nil since we haven't called setupPublishingPeerConnection
+        await XCTAssertThrowsErrorAsync(
+            try await sut.handlePublishSdpOffer(sdpOffer: "v=0...", sdpRevision: 1)
+        ) { error in
+            guard case .sdpNegotiationFailed = error as? BandwidthRTCError else {
+                XCTFail("Expected sdpNegotiationFailed")
+                return
+            }
+        }
+    }
+
+    func testPublishSdpRevisionStartsAtZero() {
+        XCTAssertEqual(sut.publishSdpRevision, 0)
+    }
+
     // MARK: - Stale SDP Offer
 
     func testStaleOfferRejected() async throws {
@@ -185,6 +201,7 @@ final class PeerConnectionManagerTests: XCTestCase {
     func testCleanupResetsSdpRevision() {
         sut.cleanup()
         XCTAssertEqual(sut.subscribeSdpRevision, 0)
+        XCTAssertEqual(sut.publishSdpRevision, 0)
     }
 
     // MARK: - Delegate Callbacks

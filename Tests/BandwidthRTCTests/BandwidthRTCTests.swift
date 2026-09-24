@@ -199,7 +199,10 @@ final class BandwidthRTCTests: XCTestCase {
     // MARK: - Unpublish
 
     func testUnpublishThrowsIfNotConnected() async {
-        let sut = makeSUT()
+        // No peer connection manager at all - connect() was never called, unlike a mid-reconnect
+        // disconnect (see ResourceLifecycleTests) where one is retained and unpublish stops the
+        // stream locally instead of throwing.
+        let sut = BandwidthRTCClient(signaling: MockSignalingClient(), peerConnectionManager: nil, audioDevice: MockMixingAudioDevice())
         let factory = RTCPeerConnectionFactory()
         let stream = RtcStream(mediaStream: factory.mediaStream(withStreamId: "s1"), mediaTypes: [.audio])
         await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
@@ -241,9 +244,11 @@ final class BandwidthRTCTests: XCTestCase {
 
         pcManager.shouldThrowOnCreatePublishOffer = BandwidthRTCError.sdpNegotiationFailed("offer failed")
 
+        // The stream was already unpublished locally when createPublishOffer fails, so the
+        // caller gets a wrapped error describing that split state rather than the raw SDP error.
         await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
-            guard case .sdpNegotiationFailed = error as? BandwidthRTCError else {
-                XCTFail("Expected sdpNegotiationFailed, got \(error)")
+            guard case .unpublishRenegotiationFailed = error as? BandwidthRTCError else {
+                XCTFail("Expected unpublishRenegotiationFailed, got \(error)")
                 return
             }
         }
@@ -259,8 +264,8 @@ final class BandwidthRTCTests: XCTestCase {
         sig.shouldThrowOnOfferSdp = BandwidthRTCError.sdpNegotiationFailed("server rejected")
 
         await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
-            guard case .sdpNegotiationFailed = error as? BandwidthRTCError else {
-                XCTFail("Expected sdpNegotiationFailed, got \(error)")
+            guard case .unpublishRenegotiationFailed = error as? BandwidthRTCError else {
+                XCTFail("Expected unpublishRenegotiationFailed, got \(error)")
                 return
             }
         }
@@ -275,8 +280,8 @@ final class BandwidthRTCTests: XCTestCase {
         pcManager.shouldThrowOnApplyPublishAnswer = BandwidthRTCError.sdpNegotiationFailed("apply failed")
 
         await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
-            guard case .sdpNegotiationFailed = error as? BandwidthRTCError else {
-                XCTFail("Expected sdpNegotiationFailed, got \(error)")
+            guard case .unpublishRenegotiationFailed = error as? BandwidthRTCError else {
+                XCTFail("Expected unpublishRenegotiationFailed, got \(error)")
                 return
             }
         }
