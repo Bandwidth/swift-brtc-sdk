@@ -18,10 +18,12 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     var shouldThrowOnApplyPublishAnswer: Error? = nil
     var shouldThrowOnAnswerInitialOffer: Error? = nil
     var shouldThrowOnHandleSubscribeSdpOffer: Error? = nil
+    var shouldThrowOnHandlePublishSdpOffer: Error? = nil
 
     var answerInitialOfferResult: String = "mock-answer-sdp"
     var createPublishOfferResult: String = "mock-offer-sdp"
     var handleSubscribeSdpOfferResult: String = "mock-subscribe-answer"
+    var handlePublishSdpOfferResult: String = "mock-publish-restart-answer"
 
     // MARK: - Concurrency support
 
@@ -47,6 +49,9 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     var reattachPublishedStreamsCallCount = 0
     var handleSubscribeSdpOfferCallCount = 0
     var answerInitialOfferCallCount = 0
+    var handlePublishSdpOfferCallCount = 0
+    var handlePublishSdpOfferRevisionArg: Int? = nil
+    var removeLocalTracksCallCount = 0
 
     // MARK: - WebRTC factory for creating stub objects
 
@@ -97,17 +102,28 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
         return answerInitialOfferResult
     }
 
+    /// Stream ids returned from `addLocalTracks`, so `removeLocalTracks` can report whether a
+    /// given id was ever actually published - mirroring the real manager's behavior for an
+    /// unknown/already-removed stream.
+    private(set) var knownStreamIds: Set<String> = []
+
     func addLocalTracks(audio: Bool) -> RTCMediaStream {
         addLocalTracksAudioArg = audio
         addLocalTracksCallCount += 1
         retainedStreamCount += 1
-        return Self.sharedFactory.mediaStream(withStreamId: "mock-\(UUID().uuidString)")
+        let stream = Self.sharedFactory.mediaStream(withStreamId: "mock-\(UUID().uuidString)")
+        knownStreamIds.insert(stream.streamId)
+        return stream
     }
 
     var removeLocalTracksStreamIdArg: String? = nil
-    func removeLocalTracks(streamId: String) {
+    @discardableResult
+    func removeLocalTracks(streamId: String) -> Bool {
         removeLocalTracksStreamIdArg = streamId
+        removeLocalTracksCallCount += 1
+        guard knownStreamIds.remove(streamId) != nil else { return false }
         retainedStreamCount = max(0, retainedStreamCount - 1)
+        return true
     }
 
     func createPublishOffer() async throws -> String {
@@ -129,6 +145,13 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
         return handleSubscribeSdpOfferResult
     }
 
+    func handlePublishSdpOffer(sdpOffer: String, sdpRevision: Int?) async throws -> String {
+        handlePublishSdpOfferCallCount += 1
+        handlePublishSdpOfferRevisionArg = sdpRevision
+        if let error = shouldThrowOnHandlePublishSdpOffer { throw error }
+        return handlePublishSdpOfferResult
+    }
+
     func setAudioEnabled(_ enabled: Bool) {
         setAudioEnabledArg = enabled
         setAudioEnabledCallCount += 1
@@ -145,6 +168,7 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
         cleanupCalled = true
         cleanupCallCount += 1
         retainedStreamCount = 0
+        knownStreamIds.removeAll()
     }
 
     func getCallStats(

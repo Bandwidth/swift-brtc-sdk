@@ -28,7 +28,9 @@ final class OrderOfOperationsTests: XCTestCase {
     }
 
     func testUnpublishBeforeConnectThrows() async {
-        let sut = makeSUT()
+        // No peer connection manager at all - connect() was never called, unlike a mid-reconnect
+        // disconnect (see ResourceLifecycleTests) where one is retained.
+        let sut = BandwidthRTCClient(signaling: MockSignalingClient(), peerConnectionManager: nil, audioDevice: MockMixingAudioDevice())
         let factory = RTCPeerConnectionFactory()
         let stream = RtcStream(mediaStream: factory.mediaStream(withStreamId: "s1"), mediaTypes: [.audio])
         await XCTAssertThrowsErrorAsync(try await sut.unpublish(stream: stream)) { error in
@@ -379,7 +381,7 @@ final class OrderOfOperationsTests: XCTestCase {
         let stream1 = sut.addLocalTracks(audio: true)
         let stream2 = sut.addLocalTracks(audio: true)
 
-        sut.removeLocalTracks(streamId: stream1.streamId)
+        XCTAssertTrue(sut.removeLocalTracks(streamId: stream1.streamId))
 
         // stream1 tracks should be disabled
         for track in stream1.audioTracks { XCTAssertFalse(track.isEnabled) }
@@ -393,8 +395,9 @@ final class OrderOfOperationsTests: XCTestCase {
         let sut = PeerConnectionManager(options: nil, audioDevice: nil)
         try sut.setupPublishingPeerConnection()
 
-        // Should not crash
-        sut.removeLocalTracks(streamId: "nonexistent-stream-id")
+        // Should not crash, and reports it found nothing to remove - the caller (unpublish())
+        // uses this to skip renegotiating for a stream it never actually had.
+        XCTAssertFalse(sut.removeLocalTracks(streamId: "nonexistent-stream-id"))
         sut.cleanup()
     }
 
