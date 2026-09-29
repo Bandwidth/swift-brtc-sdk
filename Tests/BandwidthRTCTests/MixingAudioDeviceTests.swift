@@ -376,6 +376,109 @@ final class MixingAudioDeviceTests: XCTestCase {
         XCTAssertFalse(sut.engine.isRunning)
     }
 
+    // MARK: - Silence Pump (manual activation)
+
+    private func makePumpSUT(manual: Bool = true) -> (MixingAudioDevice, SilenceRecordingDelegate) {
+        let options = AudioProcessingOptions(manualAudioSessionActivation: manual)
+        let sut = MixingAudioDevice(audioOptions: options, isSessionActive: false)
+        let delegate = SilenceRecordingDelegate()
+        _ = sut.initialize(with: delegate)
+        return (sut, delegate)
+    }
+
+    private func wait(_ seconds: TimeInterval) {
+        let exp = expectation(description: "wait")
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { exp.fulfill() }
+        wait(for: [exp], timeout: seconds + 2)
+    }
+
+    func testSilencePumpDeliversZeroFramesWhileInactiveAndRecording() {
+        let (sut, delegate) = makePumpSUT()
+        _ = sut.startRecording()
+        wait(0.3)
+        _ = sut.stopRecording()
+        _ = sut.terminateDevice()
+        XCTAssertGreaterThanOrEqual(delegate.frameCount, 5)
+        XCTAssertTrue(delegate.allSilent)
+        XCTAssertEqual(delegate.sampleCounts, [Int(sut.deviceInputSampleRate / 100)])
+    }
+
+    func testSessionDidActivateStopsSilencePump() {
+        let (sut, delegate) = makePumpSUT()
+        _ = sut.startRecording()
+        wait(0.1)
+        sut.sessionDidActivate()
+        let countAtActivation = delegate.frameCount
+        wait(0.1)
+        XCTAssertEqual(delegate.frameCount, countAtActivation, "No silent frames after activation")
+        _ = sut.terminateDevice()
+    }
+
+    func testSessionDidDeactivateWhileRecordingRestartsSilencePump() {
+        let (sut, delegate) = makePumpSUT()
+        _ = sut.startRecording()
+        sut.sessionDidActivate()
+        sut.sessionDidDeactivate()
+        let before = delegate.frameCount
+        wait(0.2)
+        XCTAssertGreaterThanOrEqual(delegate.frameCount - before, 5)
+        _ = sut.stopRecording()
+        _ = sut.terminateDevice()
+    }
+
+    func testStopRecordingStopsSilencePump() {
+        let (sut, delegate) = makePumpSUT()
+        _ = sut.startRecording()
+        wait(0.1)
+        _ = sut.stopRecording()
+        let countAtStop = delegate.frameCount
+        wait(0.1)
+        XCTAssertEqual(delegate.frameCount, countAtStop)
+        _ = sut.terminateDevice()
+    }
+
+    func testRepeatedStartRecordingDoesNotDoubleThePump() {
+        let (sut, delegate) = makePumpSUT()
+        let start = Date()
+        _ = sut.startRecording()
+        _ = sut.startRecording()
+        wait(0.5)
+        _ = sut.stopRecording()
+        let elapsed = Date().timeIntervalSince(start)
+        _ = sut.terminateDevice()
+        XCTAssertLessThanOrEqual(delegate.frameCount, Int(elapsed * 100) + 3, "Two timers would double the rate")
+        XCTAssertGreaterThanOrEqual(delegate.frameCount, 5)
+    }
+
+    func testTerminateThenDeactivateDoesNotRestartSilencePump() {
+        let (sut, delegate) = makePumpSUT()
+        _ = sut.startRecording()
+        wait(0.1)
+        _ = sut.terminateDevice()
+        let countAtTerminate = delegate.frameCount
+        sut.sessionDidDeactivate()
+        wait(0.1)
+        XCTAssertEqual(delegate.frameCount, countAtTerminate)
+    }
+
+    func testDoubleSessionDidActivateDoesNotCrash() {
+        let (sut, _) = makePumpSUT()
+        _ = sut.initializeRecording()
+        sut.sessionDidActivate()
+        sut.sessionDidActivate()
+        XCTAssertTrue(sut.isSessionActive)
+        _ = sut.terminateDevice()
+    }
+
+    func testNonManualModeNeverStartsSilencePump() {
+        let (sut, delegate) = makePumpSUT(manual: false)
+        _ = sut.startRecording()
+        wait(0.2)
+        _ = sut.stopRecording()
+        _ = sut.terminateDevice()
+        XCTAssertEqual(delegate.frameCount, 0)
+    }
+
     // MARK: - MockMixingAudioDevice Tests (ensures mock stays in sync)
 
     func testMockAudioDeviceDefaultValues() {
@@ -403,4 +506,50 @@ final class MixingAudioDeviceTests: XCTestCase {
         XCTAssertFalse(mock.recordingEnabled)
         XCTAssertFalse(mock.playoutEnabled)
     }
+}
+
+/// Captures frames passed to `deliverRecordedData` so tests can inspect the silence pump output.
+private final class SilenceRecordingDelegate: NSObject, RTCAudioDeviceDelegate {
+    private let lock = NSLock()
+    private var _frameCount = 0
+    private var _allSilent = true
+    private var _sampleCounts = Set<Int>()
+
+    var frameCount: Int { lock.lock(); defer { lock.unlock() }; return _frameCount }
+    var allSilent: Bool { lock.lock(); defer { lock.unlock() }; return _allSilent }
+    var sampleCounts: [Int] { lock.lock(); defer { lock.unlock() }; return Array(_sampleCounts) }
+
+    var deliverRecordedData: RTCAudioDeviceDeliverRecordedDataBlock {
+        return { [self] _, _, _, numFrames, bufferList, _, _ in
+            var silent = true
+            if let list = bufferList,
+               let ptr = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))[0].mData?.assumingMemoryBound(to: Int16.self) {
+                for i in 0..<Int(numFrames) where ptr[i] != 0 {
+                    silent = false
+                }
+            }
+            lock.lock()
+            _frameCount += 1
+            _allSilent = _allSilent && silent
+            _sampleCounts.insert(Int(numFrames))
+            lock.unlock()
+            return noErr
+        }
+    }
+
+    var preferredInputSampleRate: Double { 48000 }
+    var preferredInputIOBufferDuration: TimeInterval { 0.01 }
+    var preferredOutputSampleRate: Double { 48000 }
+    var preferredOutputIOBufferDuration: TimeInterval { 0.01 }
+
+    var getPlayoutData: RTCAudioDeviceGetPlayoutDataBlock {
+        return { _, _, _, _, _ in noErr }
+    }
+
+    func notifyAudioInputParametersChange() {}
+    func notifyAudioOutputParametersChange() {}
+    func notifyAudioInputInterrupted() {}
+    func notifyAudioOutputInterrupted() {}
+    func dispatchAsync(_ block: @escaping () -> Void) { block() }
+    func dispatchSync(_ block: @escaping () -> Void) { block() }
 }
