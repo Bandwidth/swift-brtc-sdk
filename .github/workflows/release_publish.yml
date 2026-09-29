@@ -50,14 +50,14 @@ jobs:
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f1-2)
 
-          # Create annotated tag for major version if it doesn't exist
-          if ! git rev-parse "v$MAJOR" >/dev/null 2>&1; then
+          # Create annotated tag for major version if it doesn't exist on the remote
+          if ! git ls-remote --exit-code --tags origin "refs/tags/v$MAJOR" >/dev/null 2>&1; then
             git tag -a "v$MAJOR" -m "Release v$MAJOR series" "v$VERSION"
             git push origin "v$MAJOR"
           fi
 
-          # Create annotated tag for major.minor version if it doesn't exist
-          if ! git rev-parse "v$MINOR" >/dev/null 2>&1; then
+          # Create annotated tag for major.minor version if it doesn't exist on the remote
+          if ! git ls-remote --exit-code --tags origin "refs/tags/v$MINOR" >/dev/null 2>&1; then
             git tag -a "v$MINOR" -m "Release v$MINOR series" "v$VERSION"
             git push origin "v$MINOR"
           fi
