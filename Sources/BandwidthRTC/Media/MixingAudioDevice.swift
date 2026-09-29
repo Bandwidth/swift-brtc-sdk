@@ -25,6 +25,7 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     private weak var delegate: (any RTCAudioDeviceDelegate)?
     private let audioQueue = DispatchQueue(label: "com.bandwidth.mixingaudio", qos: .userInteractive)
+    private let audioQueueKey = DispatchSpecificKey<Void>()
 
     // MARK: - AVAudioEngine
 
@@ -32,11 +33,41 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     public private(set) var sourceNode: AVAudioSourceNode?
     private var micConverter: AVAudioConverter?
 
+    // MARK: - CallKit manual activation
+
+    private let manualAudioSessionActivation: Bool
+
+    /// Guards `_isSessionActive`, `_isRecording` and `silencePumpTimer`. Never held while
+    /// calling the delegate or `audioQueue.sync`.
+    private let stateLock = NSLock()
+    private var _isSessionActive: Bool
+    private var _isRecording = false
+
+    /// Whether the `AVAudioSession` is currently active. Always `true` unless
+    /// `manualAudioSessionActivation` is enabled, in which case it tracks CallKit's
+    /// activation state via `sessionDidActivate()`/`sessionDidDeactivate()`.
+    public private(set) var isSessionActive: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isSessionActive }
+        set { stateLock.lock(); _isSessionActive = newValue; stateLock.unlock() }
+    }
+
     // MARK: - Init
 
-    public init(audioOptions: AudioProcessingOptions = AudioProcessingOptions()) {
+    /// - Parameter isSessionActive: Seeds the initial activation state when
+    ///   `audioOptions.manualAudioSessionActivation` is enabled. `BandwidthRTCClient` passes
+    ///   its own tracked activation state here, since CallKit's `didActivate` can arrive
+    ///   before this device is created (e.g. an incoming call answered from the lock screen).
+    ///   Ignored when manual activation is disabled — the session is then always active.
+    public init(audioOptions: AudioProcessingOptions = AudioProcessingOptions(), isSessionActive: Bool = false) {
         self.audioOptions = audioOptions
+        self.manualAudioSessionActivation = audioOptions.manualAudioSessionActivation
+        self._isSessionActive = audioOptions.manualAudioSessionActivation ? isSessionActive : true
         super.init()
+        audioQueue.setSpecific(key: audioQueueKey, value: ())
+    }
+
+    deinit {
+        silencePumpTimer?.cancel()
     }
 
     // MARK: - Audio level callbacks
@@ -54,6 +85,9 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     // MARK: - Timestamp tracking
 
     private var recordSampleTime: Double = 0
+    // Silence pump state. The timer is guarded by `stateLock`; the buffer is only touched on `audioQueue`.
+    private var silencePumpTimer: DispatchSourceTimer?
+    private var silenceInt16Buf = [Int16]()
     private var playoutSampleTime: Double = 0
 
     // MARK: - Render thread buffers (pre-allocated to avoid heap alloc on real-time thread)
@@ -72,7 +106,10 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     public private(set) var isPlayoutInitialized: Bool = false
     public private(set) var isPlaying: Bool = false
     public private(set) var isRecordingInitialized: Bool = false
-    public private(set) var isRecording: Bool = false
+    public private(set) var isRecording: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _isRecording }
+        set { stateLock.lock(); _isRecording = newValue; stateLock.unlock() }
+    }
 
     // MARK: - RTCAudioDevice: Format
 
@@ -95,7 +132,9 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
             try session.setCategory(.playAndRecord, mode: audioOptions.audioSessionMode, options: audioOptions.audioSessionCategoryOptions)
             let ioDuration = audioOptions.preferredIOBufferDuration ?? (audioOptions.useLowLatency ? 0.005 : 0.01)
             try session.setPreferredIOBufferDuration(ioDuration)
-            try session.setActive(true)
+            if !manualAudioSessionActivation {
+                try session.setActive(true)
+            }
         } catch {
             log.error("AVAudioSession config failed: \(error)")
         }
@@ -107,6 +146,10 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     }
 
     public func terminateDevice() -> Bool {
+        // Clear flags first so a concurrent sessionDidDeactivate cannot restart the pump.
+        isRecording = false
+        isPlaying = false
+        stopSilencePump()
         if let obs = engineConfigObserver {
             NotificationCenter.default.removeObserver(obs)
             engineConfigObserver = nil
@@ -140,8 +183,10 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     public func startPlayout() -> Bool {
         isPlaying = true
-        startEngineIfNeeded()
-        installPlayoutTap()
+        if isSessionActive {
+            startEngineIfNeeded()
+            installPlayoutTap()
+        }
         log.debug("Playout started")
         return true
     }
@@ -156,7 +201,9 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     // MARK: - RTCAudioDevice: Recording
 
     public func initializeRecording() -> Bool {
-        installMicTap()
+        if isSessionActive {
+            installMicTap()
+        }
         isRecordingInitialized = true
         log.debug("Recording initialized")
         return true
@@ -164,15 +211,61 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
 
     public func startRecording() -> Bool {
         isRecording = true
-        startEngineIfNeeded()
+        if isSessionActive {
+            startEngineIfNeeded()
+        } else {
+            startSilencePump()
+        }
         log.debug("Recording started")
         return true
     }
 
     public func stopRecording() -> Bool {
         isRecording = false
+        stopSilencePump()
         log.debug("Recording stopped")
         return true
+    }
+
+    // MARK: - CallKit Manual Session Activation
+
+    /// Call when `manualAudioSessionActivation` is enabled and CallKit has activated the
+    /// `AVAudioSession` (`CXProviderDelegate.provider(_:didActivate:)`, forwarded via
+    /// `BandwidthRTCClient.audioSessionDidActivate`). Starts the engine and installs
+    /// whichever taps `initializeRecording()`/`startPlayout()` deferred. No-op if manual
+    /// activation is disabled.
+    public func sessionDidActivate() {
+        guard manualAudioSessionActivation else { return }
+        isSessionActive = true
+        // Pump must be fully stopped before the mic tap starts delivering.
+        stopSilencePump()
+        if isRecordingInitialized {
+            installMicTap()
+        }
+        startEngineIfNeeded()
+        if isPlaying {
+            installPlayoutTap()
+        }
+        log.debug("AudioDevice session activated")
+    }
+
+    /// Call when `manualAudioSessionActivation` is enabled and CallKit has deactivated the
+    /// `AVAudioSession` (`CXProviderDelegate.provider(_:didDeactivate:)`, forwarded via
+    /// `BandwidthRTCClient.audioSessionDidDeactivate`). Stops the engine and removes taps,
+    /// but keeps `isPlaying`/`isRecording` so a later activation resumes automatically.
+    /// No-op if manual activation is disabled.
+    public func sessionDidDeactivate() {
+        guard manualAudioSessionActivation else { return }
+        isSessionActive = false
+        engine.inputNode.removeTap(onBus: 0)
+        engine.mainMixerNode.removeTap(onBus: 0)
+        if engine.isRunning {
+            engine.stop()
+        }
+        if isRecording {
+            startSilencePump()
+        }
+        log.debug("AudioDevice session deactivated")
     }
 
     // MARK: - Private: AVAudioEngine Setup
@@ -192,6 +285,10 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     /// Called when the audio hardware is reconfigured.
     /// The engine's I/O cycle may have been abandoned; force a stop/restart to restore it.
     private func handleEngineConfigurationChange() {
+        guard isSessionActive else {
+            log.debug("[BRTC] AVAudioEngineConfigurationChange ignored — session inactive")
+            return
+        }
         log.warn("[BRTC] AVAudioEngineConfigurationChange — restarting engine")
         engine.stop()
         // Remove stale taps before restarting to avoid double-tap overload
@@ -304,6 +401,7 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
     /// Mic audio is processed inline: deliver to WebRTC + visualization.
     private func installMicTap() {
         let inputNode = engine.inputNode
+        inputNode.removeTap(onBus: 0)  // idempotent: installTap raises if a tap already exists
         let nativeFormat = inputNode.outputFormat(forBus: 0)
 
         // nativeFormat.sampleRate is 0 when there's no real audio hardware (e.g. a headless
@@ -388,6 +486,76 @@ public final class MixingAudioDevice: NSObject, RTCAudioDevice {
         } catch {
             log.error("AVAudioEngine start failed: \(error)")
         }
+    }
+
+    // MARK: - Private: Silence Pump
+
+    /// While manual activation is on and CallKit has not activated the session, the mic tap
+    /// cannot run, so WebRTC would send no RTP and the gateway would never mark the endpoint
+    /// eligible. Feed it zero-filled 10 ms frames at real-time cadence instead. Idempotent.
+    private func startSilencePump() {
+        guard manualAudioSessionActivation else { return }
+        stateLock.lock()
+        // Re-check under the lock so a concurrent activation or stop cannot leave an idle timer.
+        guard !_isSessionActive, _isRecording, silencePumpTimer == nil else {
+            stateLock.unlock()
+            return
+        }
+
+        let frameCount = max(1, Int(audioOptions.inputSampleRate / 100))
+        let timer = DispatchSource.makeTimerSource(queue: audioQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(1))
+        timer.setEventHandler { [weak self, weak timer] in
+            // Skip if cancelled or the session went active while this event was queued.
+            guard let self, let timer, !timer.isCancelled, !self.isSessionActive else { return }
+            self.deliverSilentFrame(frameCount: frameCount)
+        }
+        silencePumpTimer = timer
+        stateLock.unlock()
+        timer.resume()
+        log.debug("Silence pump started")
+    }
+
+    /// Cancels the pump and waits for any in-flight frame delivery, so the caller can safely
+    /// hand over to the mic tap. Safe to call from any thread, including `audioQueue`.
+    private func stopSilencePump() {
+        stateLock.lock()
+        let timer = silencePumpTimer
+        silencePumpTimer = nil
+        stateLock.unlock()
+        guard let timer else { return }
+        timer.cancel()
+        // Barrier: an in-flight handler finishes before this returns. Avoid self-deadlock.
+        if DispatchQueue.getSpecific(key: audioQueueKey) == nil {
+            audioQueue.sync {}
+        }
+        log.debug("Silence pump stopped")
+    }
+
+    /// Deliver one zeroed mono Int16 frame to WebRTC. Runs on `audioQueue` only.
+    private func deliverSilentFrame(frameCount: Int) {
+        guard let delegate else { return }
+        if silenceInt16Buf.count != frameCount {
+            silenceInt16Buf = [Int16](repeating: 0, count: frameCount)
+        }
+        let sampleTime = recordSampleTime
+        silenceInt16Buf.withUnsafeMutableBytes { rawBytes in
+            var audioBuffer = AudioBuffer(
+                mNumberChannels: 1,
+                mDataByteSize: UInt32(frameCount * MemoryLayout<Int16>.size),
+                mData: rawBytes.baseAddress
+            )
+            var bufferList = AudioBufferList(mNumberBuffers: 1, mBuffers: audioBuffer)
+            var flags: AudioUnitRenderActionFlags = []
+            var timestamp = AudioTimeStamp()
+            timestamp.mSampleTime = sampleTime
+            timestamp.mFlags = .sampleTimeValid
+
+            _ = delegate.deliverRecordedData(
+                &flags, &timestamp, 0, UInt32(frameCount), &bufferList, nil, nil
+            )
+        }
+        recordSampleTime = sampleTime + Double(frameCount)
     }
 
     // MARK: - Private: Deliver Samples to WebRTC

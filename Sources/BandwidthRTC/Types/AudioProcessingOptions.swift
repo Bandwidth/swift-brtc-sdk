@@ -41,6 +41,14 @@ public struct AudioProcessingOptions: Sendable {
     /// The OS rounds this to the nearest supported value.
     public var preferredIOBufferDuration: TimeInterval?
 
+    // MARK: - CallKit
+
+    /// When `true`, the SDK never calls `AVAudioSession.setActive` itself — the app is
+    /// expected to own activation via CallKit and forward `CXProviderDelegate` callbacks
+    /// to `BandwidthRTCClient.audioSessionDidActivate`/`audioSessionDidDeactivate`.
+    /// Defaults to `false`, in which case the SDK activates the session as before.
+    public var manualAudioSessionActivation: Bool
+
     // MARK: - Init
 
     public init(
@@ -51,7 +59,8 @@ public struct AudioProcessingOptions: Sendable {
         inputChannels: Int = 1,
         outputChannels: Int = 1,
         useLowLatency: Bool = false,
-        preferredIOBufferDuration: TimeInterval? = nil
+        preferredIOBufferDuration: TimeInterval? = nil,
+        manualAudioSessionActivation: Bool = false
     ) {
         self.audioSessionMode = audioSessionMode
         self.audioSessionCategoryOptions = audioSessionCategoryOptions
@@ -61,5 +70,6 @@ public struct AudioProcessingOptions: Sendable {
         self.outputChannels = outputChannels
         self.useLowLatency = useLowLatency
         self.preferredIOBufferDuration = preferredIOBufferDuration
+        self.manualAudioSessionActivation = manualAudioSessionActivation
     }
 }
