@@ -17,6 +17,14 @@ public enum BandwidthRTCError: Error, LocalizedError, Equatable {
     case notSupported(String)
     case noActiveCall
     case reconnectFailed(String)
+    /// unpublish() removed the stream's local tracks, but renegotiating that removal with the
+    /// gateway failed - the stream is no longer publishing locally even though the failure means
+    /// this couldn't be confirmed.
+    case unpublishRenegotiationFailed(String)
+    /// The gateway closed the WebSocket with a close code other than 1001 (Going Away), the only
+    /// code that means "reconnect this same session". Includes the raw close code when one was
+    /// received; nil means the socket dropped without a close frame at all (e.g. a network drop).
+    case nonRetryableClose(Int?)
 
     public var errorDescription: String? {
         switch self {
@@ -48,6 +56,10 @@ public enum BandwidthRTCError: Error, LocalizedError, Equatable {
             return "No active call to answer or end"
         case .reconnectFailed(let detail):
             return "Reconnect failed: \(detail)"
+        case .unpublishRenegotiationFailed(let detail):
+            return "Stream was unpublished locally, but renegotiation with the gateway failed: \(detail)"
+        case .nonRetryableClose(let code):
+            return "WebSocket closed with a non-retryable close code\(code.map { " (\($0))" } ?? "")"
         }
     }
 }

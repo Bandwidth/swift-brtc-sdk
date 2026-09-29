@@ -33,6 +33,10 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
     private var publishedStreams: [String: RTCMediaStream] = [:]
     private var subscribedTrackMetadata: [String: TrackMetadata] = [:]
     private(set) var subscribeSdpRevision: Int = 0
+    /// SDP revision for gateway-initiated ICE restarts on the publishing connection. Tracked
+    /// separately from `subscribeSdpRevision` since the two peer connections renegotiate
+    /// independently and each needs its own stale-offer check.
+    private(set) var publishSdpRevision: Int = 0
 
     // MARK: - Callbacks
 
@@ -404,14 +408,72 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         return answerSdp
     }
 
+    /// Handle a gateway-initiated ICE restart offer on the publishing peer connection. Mirrors
+    /// `handleSubscribeSdpOffer`'s stale-revision rejection, but against the publish PC and its
+    /// own revision counter - the gateway answers this the same way it answers a subscribe
+    /// offer, just addressed to the other peer connection.
+    func handlePublishSdpOffer(sdpOffer: String, sdpRevision: Int?) async throws -> String {
+        let effectiveRevision = sdpRevision ?? (publishSdpRevision + 1)
+
+        guard effectiveRevision > publishSdpRevision || publishSdpRevision == 0 else {
+            log.warn("Rejecting stale publish SDP offer (revision \(effectiveRevision) <= \(publishSdpRevision))")
+            throw BandwidthRTCError.sdpNegotiationFailed("Stale SDP offer")
+        }
+
+        guard let pc = publishingPC else {
+            throw BandwidthRTCError.sdpNegotiationFailed("Publishing peer connection not available")
+        }
+
+        log.debug("[publish] Handling gateway ICE-restart offer (revision=\(effectiveRevision))")
+
+        let offer = RTCSessionDescription(type: .offer, sdp: sdpOffer)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            pc.setRemoteDescription(offer) { error in
+                if let error {
+                    continuation.resume(throwing: BandwidthRTCError.sdpNegotiationFailed(error.localizedDescription))
+                } else {
+                    continuation.resume()
+                }
+            }
+        }
+
+        let answerConstraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
+        let answerSdp: String = try await withCheckedThrowingContinuation { continuation in
+            pc.answer(for: answerConstraints) { sdp, error in
+                if let error {
+                    continuation.resume(throwing: BandwidthRTCError.sdpNegotiationFailed(error.localizedDescription))
+                    return
+                }
+                guard let sdp else {
+                    continuation.resume(throwing: BandwidthRTCError.sdpNegotiationFailed("No SDP answer generated"))
+                    return
+                }
+                pc.setLocalDescription(sdp) { error in
+                    if let error {
+                        continuation.resume(throwing: BandwidthRTCError.sdpNegotiationFailed(error.localizedDescription))
+                    } else {
+                        continuation.resume(returning: sdp.sdp)
+                    }
+                }
+            }
+        }
+
+        publishSdpRevision = effectiveRevision
+        log.debug("[publish] ICE-restart offer handled (revision=\(effectiveRevision))")
+        return answerSdp
+    }
+
     // MARK: - Media Control
 
     /// Remove local tracks for the given stream from the publishing peer connection.
     /// After calling this, renegotiate by creating a new offer via `createPublishOffer`.
-    func removeLocalTracks(streamId: String) {
+    /// Returns whether a published stream matched `streamId` - `false` means this was a no-op,
+    /// so the caller can skip renegotiating for a stream it never actually had.
+    @discardableResult
+    func removeLocalTracks(streamId: String) -> Bool {
         guard let pc = publishingPC, let stream = publishedStreams[streamId] else {
             log.warn("removeLocalTracks: stream \(streamId) not found")
-            return
+            return false
         }
 
         for track in (stream.audioTracks as [RTCMediaStreamTrack]) {
@@ -427,6 +489,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
 
         publishedStreams.removeValue(forKey: streamId)
         log.debug("Removed local tracks for stream \(streamId)")
+        return true
     }
 
     func setAudioEnabled(_ enabled: Bool) {
@@ -631,6 +694,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         subscribingPC = nil
 
         subscribeSdpRevision = 0
+        publishSdpRevision = 0
         publishIceConnected = false
     }
 

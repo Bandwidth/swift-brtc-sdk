@@ -20,7 +20,8 @@ protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
     func waitForPublishIceConnected() async throws
     func answerInitialOffer(sdpOffer: String, pcType: PeerConnectionType) async throws -> String
     func addLocalTracks(audio: Bool) -> RTCMediaStream
-    func removeLocalTracks(streamId: String)
+    @discardableResult
+    func removeLocalTracks(streamId: String) -> Bool
     func createPublishOffer() async throws -> String
     func applyPublishAnswer(localOffer: String, remoteAnswer: String) async throws
     func handleSubscribeSdpOffer(
@@ -28,6 +29,7 @@ protocol PeerConnectionManagerProtocol: AnyObject, Sendable {
         sdpRevision: Int?,
         metadata: [String: TrackMetadata]?
     ) async throws -> String
+    func handlePublishSdpOffer(sdpOffer: String, sdpRevision: Int?) async throws -> String
     func setAudioEnabled(_ enabled: Bool)
     func sendDtmf(_ tone: String, duration: Int, interToneGap: Int)
     func cleanup()

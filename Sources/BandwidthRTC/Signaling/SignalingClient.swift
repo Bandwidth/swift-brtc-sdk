@@ -19,7 +19,17 @@ private let fatalHandshakeStatusMessages: [Int: String] = [
 
 /// Payload passed to the "close" event handler describing why the socket closed, when known.
 struct WebSocketCloseInfo: Codable {
+    /// HTTP status of a rejected upgrade handshake (e.g. 403, 409). Only set when the gateway
+    /// refused the connection outright, before any WebSocket close frame could exist.
     let statusCode: Int?
+    /// The WebSocket close code (e.g. 1000, 1001, 4409, 1011). nil means no close frame was ever
+    /// received - the connection dropped abnormally (e.g. a network drop).
+    let closeCode: Int?
+
+    init(statusCode: Int? = nil, closeCode: Int? = nil) {
+        self.statusCode = statusCode
+        self.closeCode = closeCode
+    }
 }
 
 /// Actor that manages the WebSocket connection and JSON-RPC signaling with the BRTC gateway.
@@ -351,10 +361,14 @@ actor SignalingClient {
             return
         }
         let statusCode = (socket.response as? HTTPURLResponse)?.statusCode
+        // `.invalid` means no close frame was ever received (e.g. the connection dropped
+        // abnormally over a network loss) rather than a deliberate close by either side - treat
+        // it as "no code known", the same as a code this SDK doesn't recognize.
+        let closeCode: Int? = socket.closeCode == .invalid ? nil : socket.closeCode.rawValue
         if let statusCode, let fatalMessage = fatalHandshakeStatusMessages[statusCode] {
             log.error(fatalMessage)
         } else {
-            log.error("WebSocket receive error: \(error.localizedDescription)")
+            log.error("WebSocket receive error: \(error.localizedDescription) (closeCode=\(closeCode.map(String.init) ?? "none"))")
         }
         let wasConnected = isConnected
         isConnected = false
@@ -369,7 +383,7 @@ actor SignalingClient {
             // Notify disconnect handler with the classified close reason, if known. The reconnect
             // loop reads this to decide whether the gateway's refusal is worth retrying at all.
             if let handler = eventHandlers["close"] {
-                let closeInfo = WebSocketCloseInfo(statusCode: statusCode)
+                let closeInfo = WebSocketCloseInfo(statusCode: statusCode, closeCode: closeCode)
                 handler((try? JSONEncoder().encode(closeInfo)) ?? Data())
             }
         }

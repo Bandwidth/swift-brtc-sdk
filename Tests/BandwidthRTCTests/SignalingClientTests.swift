@@ -268,7 +268,10 @@ final class SignalingClientTests: XCTestCase {
 
         // Inject a receive error to simulate WebSocket drop
         mockWS.enqueueError(URLError(.networkConnectionLost))
-        await fulfillment(of: [closeExpectation], timeout: 2.0)
+        // The error is queued regardless of when the receive loop actually starts, so this only
+        // needs to be generous enough for a loaded CI runner to schedule that loop at all - not
+        // a measure of how long the loop itself takes to run.
+        await fulfillment(of: [closeExpectation], timeout: 10.0)
 
         let connected = await sut.isConnected
         XCTAssertFalse(connected)
@@ -297,5 +300,55 @@ final class SignalingClientTests: XCTestCase {
 
         let closeInfo = try JSONDecoder().decode(WebSocketCloseInfo.self, from: receivedData ?? Data())
         XCTAssertEqual(closeInfo.statusCode, 409)
+    }
+
+    func testCloseEventCarriesCloseCodeFromSocket() async throws {
+        let mockWS = MockWebSocket()
+        let sut = SignalingClient { _ in (mockWS, nil) }
+
+        let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        connectTask.cancel()
+
+        // The gateway sent a close frame with code 1001 (Going Away) before the socket died.
+        mockWS.closeCode = .goingAway
+
+        let closeExpectation = expectation(description: "close event fired")
+        var receivedData: Data?
+        await sut.onEvent("close") { data in
+            receivedData = data
+            closeExpectation.fulfill()
+        }
+
+        mockWS.enqueueError(URLError(.networkConnectionLost))
+        await fulfillment(of: [closeExpectation], timeout: 2.0)
+
+        let closeInfo = try JSONDecoder().decode(WebSocketCloseInfo.self, from: receivedData ?? Data())
+        XCTAssertEqual(closeInfo.closeCode, 1001)
+    }
+
+    func testCloseEventReportsNoCloseCodeOnAbnormalClosure() async throws {
+        let mockWS = MockWebSocket()
+        let sut = SignalingClient { _ in (mockWS, nil) }
+
+        let connectTask = Task { try await sut.connect(authParams: self.validAuthParams, options: nil) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        connectTask.cancel()
+
+        // No close frame was ever received (e.g. a raw network drop) - `.invalid` is the default.
+        XCTAssertEqual(mockWS.closeCode, .invalid)
+
+        let closeExpectation = expectation(description: "close event fired")
+        var receivedData: Data?
+        await sut.onEvent("close") { data in
+            receivedData = data
+            closeExpectation.fulfill()
+        }
+
+        mockWS.enqueueError(URLError(.networkConnectionLost))
+        await fulfillment(of: [closeExpectation], timeout: 2.0)
+
+        let closeInfo = try JSONDecoder().decode(WebSocketCloseInfo.self, from: receivedData ?? Data())
+        XCTAssertNil(closeInfo.closeCode)
     }
 }
