@@ -13,6 +13,11 @@ public struct CallStatsSnapshot: Sendable {
     public var packetsSent: Int = 0
     public var bytesSent: Int = 0
 
+    // RTCP receiver report (remote-inbound-rtp on publish PC)
+    public var remoteFractionLost: Double = 0 // 0.0 to 1.0
+    public var remoteJitter: Double = 0       // seconds
+    public var rtcpRoundTripTime: Double = 0  // seconds
+
     // Derived / extra
     public var roundTripTime: Double = 0   // seconds (from candidate-pair)
     public var codec: String = "unknown"   // e.g. "opus"

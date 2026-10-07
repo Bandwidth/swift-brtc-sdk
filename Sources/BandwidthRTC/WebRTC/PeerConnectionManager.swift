@@ -600,32 +600,11 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         if let subPC = subscribingPC {
             group.enter()
             subPC.statistics { report in
-                var codecId: String?
-
-                for stat in report.statistics.values {
-                    if stat.type == "inbound-rtp",
-                       let kind = stat.values["kind"] as? String, kind == "audio" {
-                        snapshot.packetsReceived = (stat.values["packetsReceived"] as? NSNumber)?.intValue ?? 0
-                        snapshot.packetsLost = (stat.values["packetsLost"] as? NSNumber)?.intValue ?? 0
-                        snapshot.bytesReceived = (stat.values["bytesReceived"] as? NSNumber)?.intValue ?? 0
-                        snapshot.jitter = (stat.values["jitter"] as? NSNumber)?.doubleValue ?? 0
-                        snapshot.audioLevel = (stat.values["audioLevel"] as? NSNumber)?.doubleValue ?? 0
-                        codecId = stat.values["codecId"] as? String
-                    }
-
-                    if stat.type == "candidate-pair",
-                       let state = stat.values["state"] as? String, state == "succeeded" {
-                        snapshot.roundTripTime = (stat.values["currentRoundTripTime"] as? NSNumber)?.doubleValue ?? 0
-                    }
-                }
-
-                // Resolve codec name
-                if let codecId, let codecStat = report.statistics[codecId] {
-                    if let mimeType = codecStat.values["mimeType"] as? String {
-                        snapshot.codec = mimeType.replacingOccurrences(of: "audio/", with: "")
-                    }
-                }
-
+                Self.applySubscribeStats(
+                    report.statistics.values.map { (type: $0.type, values: $0.values) },
+                    codecMimeType: { report.statistics[$0]?.values["mimeType"] as? String },
+                    to: &snapshot
+                )
                 group.leave()
             }
         }
@@ -634,13 +613,10 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         if let pubPC = publishingPC {
             group.enter()
             pubPC.statistics { report in
-                for stat in report.statistics.values {
-                    if stat.type == "outbound-rtp",
-                       let kind = stat.values["kind"] as? String, kind == "audio" {
-                        snapshot.packetsSent = (stat.values["packetsSent"] as? NSNumber)?.intValue ?? 0
-                        snapshot.bytesSent = (stat.values["bytesSent"] as? NSNumber)?.intValue ?? 0
-                    }
-                }
+                Self.applyPublishStats(
+                    report.statistics.values.map { (type: $0.type, values: $0.values) },
+                    to: &snapshot
+                )
                 group.leave()
             }
         }
@@ -658,6 +634,58 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             }
 
             completion(snapshot)
+        }
+    }
+
+    /// Parse subscribe-PC stats (inbound-rtp, candidate-pair, codec) into the snapshot.
+    static func applySubscribeStats(
+        _ stats: [(type: String, values: [String: Any])],
+        codecMimeType: (String) -> String?,
+        to snapshot: inout CallStatsSnapshot
+    ) {
+        var codecId: String?
+
+        for stat in stats {
+            if stat.type == "inbound-rtp",
+               let kind = stat.values["kind"] as? String, kind == "audio" {
+                snapshot.packetsReceived = (stat.values["packetsReceived"] as? NSNumber)?.intValue ?? 0
+                snapshot.packetsLost = (stat.values["packetsLost"] as? NSNumber)?.intValue ?? 0
+                snapshot.bytesReceived = (stat.values["bytesReceived"] as? NSNumber)?.intValue ?? 0
+                snapshot.jitter = (stat.values["jitter"] as? NSNumber)?.doubleValue ?? 0
+                snapshot.audioLevel = (stat.values["audioLevel"] as? NSNumber)?.doubleValue ?? 0
+                codecId = stat.values["codecId"] as? String
+            }
+
+            if stat.type == "candidate-pair",
+               let state = stat.values["state"] as? String, state == "succeeded" {
+                snapshot.roundTripTime = (stat.values["currentRoundTripTime"] as? NSNumber)?.doubleValue ?? 0
+            }
+        }
+
+        // Resolve codec name
+        if let codecId, let mimeType = codecMimeType(codecId) {
+            snapshot.codec = mimeType.replacingOccurrences(of: "audio/", with: "")
+        }
+    }
+
+    /// Parse publish-PC stats (outbound-rtp, remote-inbound-rtp) into the snapshot.
+    static func applyPublishStats(
+        _ stats: [(type: String, values: [String: Any])],
+        to snapshot: inout CallStatsSnapshot
+    ) {
+        for stat in stats {
+            if stat.type == "outbound-rtp",
+               let kind = stat.values["kind"] as? String, kind == "audio" {
+                snapshot.packetsSent = (stat.values["packetsSent"] as? NSNumber)?.intValue ?? 0
+                snapshot.bytesSent = (stat.values["bytesSent"] as? NSNumber)?.intValue ?? 0
+            }
+
+            if stat.type == "remote-inbound-rtp",
+               let kind = stat.values["kind"] as? String, kind == "audio" {
+                snapshot.remoteFractionLost = (stat.values["fractionLost"] as? NSNumber)?.doubleValue ?? 0
+                snapshot.remoteJitter = (stat.values["jitter"] as? NSNumber)?.doubleValue ?? 0
+                snapshot.rtcpRoundTripTime = (stat.values["roundTripTime"] as? NSNumber)?.doubleValue ?? 0
+            }
         }
     }
 
