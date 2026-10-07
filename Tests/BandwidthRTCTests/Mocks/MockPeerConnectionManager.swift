@@ -42,6 +42,9 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     var sendDtmfDurationArg: Int? = nil
     var sendDtmfInterToneGapArg: Int? = nil
     var sendDtmfCallCount = 0
+    var getCallStatsCallCount = 0
+    var getCallStatsPreviousInboundBytesArgs: [Int] = []
+    var getCallStatsResult = CallStatsSnapshot()
     var cleanupCalled = false
     var cleanupCallCount = 0
     var waitForPublishIceConnectedCallCount = 0
@@ -177,6 +180,8 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
         previousTimestamp: TimeInterval,
         completion: @escaping (CallStatsSnapshot) -> Void
     ) {
-        completion(CallStatsSnapshot())
+        getCallStatsCallCount += 1
+        getCallStatsPreviousInboundBytesArgs.append(previousInboundBytes)
+        completion(getCallStatsResult)
     }
 }

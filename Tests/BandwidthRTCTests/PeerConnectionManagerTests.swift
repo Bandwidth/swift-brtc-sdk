@@ -274,4 +274,81 @@ final class PeerConnectionManagerTests: XCTestCase {
         // (full integration test requires a real peer connection with data channel)
         XCTAssertNotNil(sut.publishingPC)
     }
+
+    // MARK: - Call Stats Parsing
+
+    private typealias Stat = (type: String, values: [String: Any])
+
+    private func publishSnapshot(_ stats: [Stat]) -> CallStatsSnapshot {
+        var snapshot = CallStatsSnapshot()
+        PeerConnectionManager.applyPublishStats(stats, to: &snapshot)
+        return snapshot
+    }
+
+    func testPublishStatsParsesRemoteInboundRtpAudio() {
+        let s = publishSnapshot([(type: "remote-inbound-rtp", values: [
+            "kind": "audio", "fractionLost": NSNumber(value: 0.25),
+            "jitter": NSNumber(value: 0.01), "roundTripTime": NSNumber(value: 0.08)
+        ])])
+        XCTAssertEqual(s.remoteFractionLost, 0.25)
+        XCTAssertEqual(s.remoteJitter, 0.01)
+        XCTAssertEqual(s.rtcpRoundTripTime, 0.08)
+    }
+
+    func testPublishStatsWithoutRemoteInboundRtpLeavesDefaults() {
+        let s = publishSnapshot([(type: "outbound-rtp", values: ["kind": "audio"])])
+        XCTAssertEqual(s.remoteFractionLost, 0)
+        XCTAssertEqual(s.remoteJitter, 0)
+        XCTAssertEqual(s.rtcpRoundTripTime, 0)
+    }
+
+    func testPublishStatsIgnoresNonAudioRemoteInboundRtp() {
+        let s = publishSnapshot([(type: "remote-inbound-rtp", values: [
+            "kind": "video", "fractionLost": NSNumber(value: 0.5),
+            "jitter": NSNumber(value: 0.5), "roundTripTime": NSNumber(value: 0.5)
+        ])])
+        XCTAssertEqual(s.remoteFractionLost, 0)
+        XCTAssertEqual(s.remoteJitter, 0)
+        XCTAssertEqual(s.rtcpRoundTripTime, 0)
+    }
+
+    func testPublishStatsMissingOrNonNumericRemoteValuesDefaultToZero() {
+        let s = publishSnapshot([(type: "remote-inbound-rtp", values: [
+            "kind": "audio", "fractionLost": "bad", "jitter": "bad"
+        ])])
+        XCTAssertEqual(s.remoteFractionLost, 0)
+        XCTAssertEqual(s.remoteJitter, 0)
+        XCTAssertEqual(s.rtcpRoundTripTime, 0)
+    }
+
+    func testPublishStatsParsesOutboundRtpAlongsideRemoteInbound() {
+        let s = publishSnapshot([
+            (type: "outbound-rtp", values: [
+                "kind": "audio", "packetsSent": NSNumber(value: 10), "bytesSent": NSNumber(value: 2000)
+            ]),
+            (type: "remote-inbound-rtp", values: ["kind": "audio", "jitter": NSNumber(value: 0.02)])
+        ])
+        XCTAssertEqual(s.packetsSent, 10)
+        XCTAssertEqual(s.bytesSent, 2000)
+        XCTAssertEqual(s.remoteJitter, 0.02)
+    }
+
+    func testSubscribeStatsParsesInboundCandidatePairAndCodec() {
+        var s = CallStatsSnapshot()
+        PeerConnectionManager.applySubscribeStats([
+            (type: "inbound-rtp", values: [
+                "kind": "audio", "packetsReceived": NSNumber(value: 5), "packetsLost": NSNumber(value: 1),
+                "bytesReceived": NSNumber(value: 800), "jitter": NSNumber(value: 0.03),
+                "audioLevel": NSNumber(value: 0.4), "codecId": "c1"
+            ]),
+            (type: "candidate-pair", values: ["state": "succeeded", "currentRoundTripTime": NSNumber(value: 0.05)])
+        ], codecMimeType: { $0 == "c1" ? "audio/opus" : nil }, to: &s)
+        XCTAssertEqual(s.packetsReceived, 5)
+        XCTAssertEqual(s.packetsLost, 1)
+        XCTAssertEqual(s.bytesReceived, 800)
+        XCTAssertEqual(s.jitter, 0.03)
+        XCTAssertEqual(s.audioLevel, 0.4)
+        XCTAssertEqual(s.roundTripTime, 0.05)
+        XCTAssertEqual(s.codec, "opus")
+    }
 }
