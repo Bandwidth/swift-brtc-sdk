@@ -218,6 +218,13 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// First backoff delay, in seconds. Overridable so tests do not have to wait a real second.
     var reconnectBaseDelay: TimeInterval = 1
 
+    /// How often the call stats snapshot is written to the debug log while connected. Overridable
+    /// so tests do not have to wait five minutes.
+    var callStatsTraceInterval: TimeInterval = 5 * 60
+
+    /// Periodic call stats trace; running exactly while a session is established.
+    private var callStatsTraceTask: Task<Void, Never>?
+
     /// Whether the CallKit-managed `AVAudioSession` is currently active.
     /// Stored on the client rather than `MixingAudioDevice` because CallKit's `didActivate`
     /// can arrive before `connect()` creates a device — e.g. an incoming call answered from
@@ -359,6 +366,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         isConnected = true
         hasActiveCall = true
         Logger.shared.info("Connected to BRTC (endpoint=\(mediaResult.endpointId ?? "unknown"))")
+        startCallStatsTrace()
 
         let readyMetadata = ReadyMetadata(
             endpointId: mediaResult.endpointId,
@@ -411,6 +419,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     // MARK: - Private: Session Cleanup
 
     private func cleanupSession() async {
+        stopCallStatsTrace()
         isConnected = false
         hasActiveCall = false
         peerConnectionManager?.cleanup()
@@ -419,6 +428,38 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         mixingDevice = nil
         await signaling?.disconnect()
         signaling = nil
+    }
+
+    // MARK: - Private: Call Stats Trace
+
+    private func startCallStatsTrace() {
+        stopCallStatsTrace()
+        let intervalNanoseconds = UInt64(callStatsTraceInterval * 1_000_000_000)
+        callStatsTraceTask = Task { [weak self] in
+            // Previous traced snapshot; lets each trace carry bitrates computed over the interval.
+            var previous: CallStatsSnapshot?
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalNanoseconds)
+                guard !Task.isCancelled, let self else { return }
+                // Reads the manager directly, so the trace does not depend on the public API.
+                guard let pcManager = self.peerConnectionManager else { continue }
+                let snapshot = await withCheckedContinuation { continuation in
+                    pcManager.getCallStats(
+                        previousInboundBytes: previous?.bytesReceived ?? 0,
+                        previousOutboundBytes: previous?.bytesSent ?? 0,
+                        previousTimestamp: previous?.timestamp ?? 0,
+                        completion: { continuation.resume(returning: $0) }
+                    )
+                }
+                previous = snapshot
+                Logger.shared.debug("Call stats: \(snapshot)")
+            }
+        }
+    }
+
+    private func stopCallStatsTrace() {
+        callStatsTraceTask?.cancel()
+        callStatsTraceTask = nil
     }
 
     // MARK: - Private: Reconnect
