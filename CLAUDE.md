@@ -133,7 +133,7 @@ Key xcodebuild flags: `BUILD_LIBRARY_FOR_DISTRIBUTION=YES`, `CODE_SIGN_IDENTITY=
 
 | Package | Version | Purpose |
 |---|---|---|
-| `stasel/WebRTC` | `114.0.0` (exact) | Core WebRTC engine |
+| `stasel/WebRTC` | `153.0.0` (exact) | Core WebRTC engine |
 
 No other external dependencies. Do not add dependencies without a strong reason.
 
