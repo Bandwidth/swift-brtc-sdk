@@ -45,6 +45,12 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     var getCallStatsCallCount = 0
     var getCallStatsPreviousInboundBytesArgs: [Int] = []
     var getCallStatsResult = CallStatsSnapshot()
+    /// cleanup() calls seen so far each time getCallStats ran; shows whether a read beat the teardown.
+    var getCallStatsCleanupCallCountArgs: [Int] = []
+    /// resetPeerConnections() calls seen so far each time getCallStats ran.
+    var getCallStatsResetCallCountArgs: [Int] = []
+    /// When false, getCallStats never calls its completion, like a read on a closed peer connection.
+    var getCallStatsCompletes = true
     var cleanupCalled = false
     var cleanupCallCount = 0
     var waitForPublishIceConnectedCallCount = 0
@@ -182,6 +188,10 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     ) {
         getCallStatsCallCount += 1
         getCallStatsPreviousInboundBytesArgs.append(previousInboundBytes)
-        completion(getCallStatsResult)
+        getCallStatsCleanupCallCountArgs.append(cleanupCallCount)
+        getCallStatsResetCallCountArgs.append(resetPeerConnectionsCallCount)
+        if getCallStatsCompletes {
+            completion(getCallStatsResult)
+        }
     }
 }

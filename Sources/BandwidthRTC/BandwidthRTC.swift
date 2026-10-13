@@ -222,8 +222,29 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// so tests do not have to wait five minutes.
     var callStatsTraceInterval: TimeInterval = 5 * 60
 
+    /// A stats read that has not completed by now is reported and dropped. A peer connection can
+    /// be closed with a read in flight, in which case its callback may never fire. Overridable so
+    /// tests do not have to wait for it.
+    var callStatsReadTimeout: TimeInterval = 1
+
     /// Periodic call stats trace; running exactly while a session is established.
     private var callStatsTraceTask: Task<Void, Never>?
+
+    /// Previous traced snapshot; lets each trace carry bitrates computed over the trace interval.
+    private let callStatsLock = NSLock()
+    private var tracedCallStats: CallStatsSnapshot?
+    private var lastTracedCallStats: CallStatsSnapshot? {
+        get {
+            callStatsLock.lock()
+            defer { callStatsLock.unlock() }
+            return tracedCallStats
+        }
+        set {
+            callStatsLock.lock()
+            defer { callStatsLock.unlock() }
+            tracedCallStats = newValue
+        }
+    }
 
     /// Whether the CallKit-managed `AVAudioSession` is currently active.
     /// Stored on the client rather than `MixingAudioDevice` because CallKit's `didActivate`
@@ -311,6 +332,8 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         // Connect WebSocket
         try await sig.connect(authParams: authParams, options: options)
 
+        // A reconnect is about to close the previous session's peer connections
+        await endCallStatsTrace(reason: "reconnect")
         let pcMgr = try preparePeerConnectionManager()
 
         // Wire up peer connection callbacks
@@ -419,7 +442,8 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     // MARK: - Private: Session Cleanup
 
     private func cleanupSession() async {
-        stopCallStatsTrace()
+        // Before the peer connections close: the final read has to see them alive
+        await endCallStatsTrace(reason: "session cleanup")
         isConnected = false
         hasActiveCall = false
         peerConnectionManager?.cleanup()
@@ -433,26 +457,23 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     // MARK: - Private: Call Stats Trace
 
     private func startCallStatsTrace() {
+        // Each session starts a fresh trace: no task or baseline carries over from an earlier one
         stopCallStatsTrace()
         let intervalNanoseconds = UInt64(callStatsTraceInterval * 1_000_000_000)
         callStatsTraceTask = Task { [weak self] in
-            // Previous traced snapshot; lets each trace carry bitrates computed over the interval.
-            var previous: CallStatsSnapshot?
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: intervalNanoseconds)
                 guard !Task.isCancelled, let self else { return }
-                // Reads the manager directly, so the trace does not depend on the public API.
-                guard let pcManager = self.peerConnectionManager else { continue }
-                let snapshot = await withCheckedContinuation { continuation in
-                    pcManager.getCallStats(
-                        previousInboundBytes: previous?.bytesReceived ?? 0,
-                        previousOutboundBytes: previous?.bytesSent ?? 0,
-                        previousTimestamp: previous?.timestamp ?? 0,
-                        completion: { continuation.resume(returning: $0) }
-                    )
+                let snapshot = await self.traceCallStats(
+                    label: "Call stats",
+                    pcManager: self.peerConnectionManager,
+                    baseline: self.lastTracedCallStats
+                )
+                // The trace ended while the read was in flight: the result belongs to an earlier session
+                guard !Task.isCancelled else { return }
+                if let snapshot {
+                    self.lastTracedCallStats = snapshot
                 }
-                previous = snapshot
-                Logger.shared.debug("Call stats: \(snapshot)")
             }
         }
     }
@@ -460,6 +481,48 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     private func stopCallStatsTrace() {
         callStatsTraceTask?.cancel()
         callStatsTraceTask = nil
+        lastTracedCallStats = nil
+    }
+
+    /// Logs one last snapshot and stops the trace. No-op when no trace is running, so every path
+    /// that ends a session can call it. Call it before the peer connections close.
+    private func endCallStatsTrace(reason: String) async {
+        guard callStatsTraceTask != nil else { return }
+        let baseline = lastTracedCallStats
+        let pcManager = peerConnectionManager
+        stopCallStatsTrace()
+        _ = await traceCallStats(label: "Final call stats (\(reason))", pcManager: pcManager, baseline: baseline)
+    }
+
+    /// Reads and logs one snapshot. Returns it only when the read completed, so a timed-out read is
+    /// reported rather than logged as zeros and never becomes a bitrate baseline.
+    private func traceCallStats(
+        label: String,
+        pcManager: (any PeerConnectionManagerProtocol)?,
+        baseline: CallStatsSnapshot?
+    ) async -> CallStatsSnapshot? {
+        // Reads the manager directly, so the trace does not depend on the public API.
+        guard let pcManager else {
+            Logger.shared.debug("\(label) skipped: no peer connection manager")
+            return nil
+        }
+        let timeout = callStatsReadTimeout
+        let snapshot: CallStatsSnapshot? = await withCheckedContinuation { continuation in
+            let once = ResumeOnce(continuation)
+            pcManager.getCallStats(
+                previousInboundBytes: baseline?.bytesReceived ?? 0,
+                previousOutboundBytes: baseline?.bytesSent ?? 0,
+                previousTimestamp: baseline?.timestamp ?? 0,
+                completion: { once.resume(returning: $0) }
+            )
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { once.resume(returning: nil) }
+        }
+        guard let snapshot else {
+            Logger.shared.warn("\(label) timed out after \(timeout)s")
+            return nil
+        }
+        Logger.shared.debug("\(label): \(snapshot)")
+        return snapshot
     }
 
     // MARK: - Private: Reconnect
@@ -945,5 +1008,23 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             // renegotiation, so this is logged as an error rather than debug.
             Logger.shared.error("Failed to handle publish SDP offer: \(error)")
         }
+    }
+}
+
+/// Resumes a continuation at most once, whichever of two racing callers gets there first.
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<CallStatsSnapshot?, Never>?
+
+    init(_ continuation: CheckedContinuation<CallStatsSnapshot?, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: CallStatsSnapshot?) {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
     }
 }
