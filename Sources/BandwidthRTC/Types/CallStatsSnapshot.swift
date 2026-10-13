@@ -1,6 +1,9 @@
 import Foundation
 
 /// A snapshot of WebRTC call statistics at a point in time.
+///
+/// A field that is not reported yet is 0, so 0 does not always mean a perfect value.
+/// RTCP fields are 0 until the first receiver report arrives.
 public struct CallStatsSnapshot: Sendable {
     // Inbound (subscribe PC)
     public var packetsReceived: Int = 0
@@ -19,7 +22,7 @@ public struct CallStatsSnapshot: Sendable {
     public var rtcpRoundTripTime: Double = 0  // seconds
 
     // Derived / extra
-    public var roundTripTime: Double = 0   // seconds (from candidate-pair)
+    public var roundTripTime: Double = 0   // seconds (from the selected candidate-pair)
     public var codec: String = "unknown"   // e.g. "opus"
     public var inboundBitrate: Double = 0  // bits per second (calculated)
     public var outboundBitrate: Double = 0 // bits per second (calculated)

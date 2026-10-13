@@ -341,8 +341,11 @@ final class PeerConnectionManagerTests: XCTestCase {
                 "bytesReceived": NSNumber(value: 800), "jitter": NSNumber(value: 0.03),
                 "audioLevel": NSNumber(value: 0.4), "codecId": "c1"
             ]),
-            (type: "candidate-pair", values: ["state": "succeeded", "currentRoundTripTime": NSNumber(value: 0.05)])
-        ], codecMimeType: { $0 == "c1" ? "audio/opus" : nil }, to: &s)
+            (type: "candidate-pair", values: [
+                "state": "succeeded", "nominated": NSNumber(value: true),
+                "currentRoundTripTime": NSNumber(value: 0.05)
+            ])
+        ], codecMimeType: { $0 == "c1" ? "audio/opus" : nil }, statValues: { _ in nil }, to: &s)
         XCTAssertEqual(s.packetsReceived, 5)
         XCTAssertEqual(s.packetsLost, 1)
         XCTAssertEqual(s.bytesReceived, 800)
@@ -350,5 +353,102 @@ final class PeerConnectionManagerTests: XCTestCase {
         XCTAssertEqual(s.audioLevel, 0.4)
         XCTAssertEqual(s.roundTripTime, 0.05)
         XCTAssertEqual(s.codec, "opus")
+    }
+
+    private func subscribeSnapshot(
+        _ stats: [Stat],
+        byId: [String: [String: Any]] = [:]
+    ) -> CallStatsSnapshot {
+        var snapshot = CallStatsSnapshot()
+        PeerConnectionManager.applySubscribeStats(
+            stats, codecMimeType: { _ in nil }, statValues: { byId[$0] }, to: &snapshot
+        )
+        return snapshot
+    }
+
+    func testSubscribeStatsSumsCountersAndTakesMaxQualityAcrossAudioStreams() {
+        let s = subscribeSnapshot([
+            (type: "inbound-rtp", values: [
+                "kind": "audio", "packetsReceived": NSNumber(value: 5), "packetsLost": NSNumber(value: 1),
+                "bytesReceived": NSNumber(value: 800), "jitter": NSNumber(value: 0.03),
+                "audioLevel": NSNumber(value: 0.4)
+            ]),
+            (type: "inbound-rtp", values: [
+                "kind": "audio", "packetsReceived": NSNumber(value: 7), "packetsLost": NSNumber(value: 2),
+                "bytesReceived": NSNumber(value: 1200), "jitter": NSNumber(value: 0.05),
+                "audioLevel": NSNumber(value: 0.2)
+            ])
+        ])
+        XCTAssertEqual(s.packetsReceived, 12)
+        XCTAssertEqual(s.packetsLost, 3)
+        XCTAssertEqual(s.bytesReceived, 2000)
+        XCTAssertEqual(s.jitter, 0.05)
+        XCTAssertEqual(s.audioLevel, 0.4)
+    }
+
+    func testSubscribeStatsKeepsFirstCodecId() {
+        var s = CallStatsSnapshot()
+        PeerConnectionManager.applySubscribeStats([
+            (type: "inbound-rtp", values: ["kind": "audio", "codecId": "c1"]),
+            (type: "inbound-rtp", values: ["kind": "audio", "codecId": "c2"])
+        ], codecMimeType: { $0 == "c1" ? "audio/opus" : "audio/PCMU" }, statValues: { _ in nil }, to: &s)
+        XCTAssertEqual(s.codec, "opus")
+    }
+
+    func testSubscribeStatsUsesTransportSelectedCandidatePairForRoundTripTime() {
+        let s = subscribeSnapshot([
+            (type: "transport", values: ["selectedCandidatePairId": "selected"]),
+            (type: "candidate-pair", values: [
+                "state": "succeeded", "nominated": NSNumber(value: true),
+                "currentRoundTripTime": NSNumber(value: 0.9)
+            ])
+        ], byId: [
+            "selected": ["state": "succeeded", "currentRoundTripTime": NSNumber(value: 0.04)]
+        ])
+        XCTAssertEqual(s.roundTripTime, 0.04)
+    }
+
+    func testSubscribeStatsFallsBackToNominatedSucceededPairWithoutTransport() {
+        let s = subscribeSnapshot([
+            (type: "candidate-pair", values: [
+                "state": "succeeded", "nominated": NSNumber(value: true),
+                "currentRoundTripTime": NSNumber(value: 0.07)
+            ])
+        ])
+        XCTAssertEqual(s.roundTripTime, 0.07)
+    }
+
+    func testSubscribeStatsIgnoresSucceededPairThatIsNotNominated() {
+        let s = subscribeSnapshot([
+            (type: "candidate-pair", values: [
+                "state": "succeeded", "nominated": NSNumber(value: false),
+                "currentRoundTripTime": NSNumber(value: 0.5)
+            ])
+        ])
+        XCTAssertEqual(s.roundTripTime, 0)
+    }
+
+    func testPublishStatsSumsOutboundAndTakesMaxRemoteInboundAcrossAudioStreams() {
+        let s = publishSnapshot([
+            (type: "outbound-rtp", values: [
+                "kind": "audio", "packetsSent": NSNumber(value: 10), "bytesSent": NSNumber(value: 2000)
+            ]),
+            (type: "outbound-rtp", values: [
+                "kind": "audio", "packetsSent": NSNumber(value: 4), "bytesSent": NSNumber(value: 500)
+            ]),
+            (type: "remote-inbound-rtp", values: [
+                "kind": "audio", "fractionLost": NSNumber(value: 0.1),
+                "jitter": NSNumber(value: 0.02), "roundTripTime": NSNumber(value: 0.2)
+            ]),
+            (type: "remote-inbound-rtp", values: [
+                "kind": "audio", "fractionLost": NSNumber(value: 0.3),
+                "jitter": NSNumber(value: 0.01), "roundTripTime": NSNumber(value: 0.1)
+            ])
+        ])
+        XCTAssertEqual(s.packetsSent, 14)
+        XCTAssertEqual(s.bytesSent, 2500)
+        XCTAssertEqual(s.remoteFractionLost, 0.3)
+        XCTAssertEqual(s.remoteJitter, 0.02)
+        XCTAssertEqual(s.rtcpRoundTripTime, 0.2)
     }
 }
