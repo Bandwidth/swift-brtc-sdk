@@ -263,6 +263,11 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
     /// Own baseline, separate from the 5-minute trace's, so each trace's bitrates span its own interval.
     private var tracedInCallStats: CallStatsSnapshot?
+
+    /// Snapshot read just before the latest subscribe re-offer was applied. The gateway ends a
+    /// call with a re-offer that removes its track, so this is the last one that still has the
+    /// call's inbound stats. Guarded by `inCallLock`.
+    private var preOfferInCallStats: CallStatsSnapshot?
     private var lastTracedInCallStats: CallStatsSnapshot? {
         get {
             inCallLock.lock()
@@ -546,10 +551,15 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     private func callStreamUnavailable(_ streamId: String) {
         inCallLock.lock()
         let isLastStream = activeCallStreamIds.remove(streamId) != nil && activeCallStreamIds.isEmpty
-        let ended = isLastStream ? stopInCallStatsTraceLocked() : (wasRunning: false, baseline: nil)
+        let ended = isLastStream ? stopInCallStatsTraceLocked() : (wasRunning: false, baseline: nil, preOffer: nil)
         let pcManager = peerConnectionManager
         inCallLock.unlock()
         guard ended.wasRunning else { return }
+        // A fresh read would run after the re-offer removed the call's track and report zeros
+        if let preOffer = ended.preOffer {
+            Logger.shared.debug("Final in-call stats (call ended): \(preOffer)")
+            return
+        }
         // The callback is synchronous, so the final read runs detached
         Task { [weak self] in
             _ = await self?.traceCallStats(
@@ -582,16 +592,48 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         }
     }
 
-    /// Stops the trace and forgets the active streams. Reports whether a trace was running and
-    /// the baseline its final read should use. Caller holds `inCallLock`.
-    private func stopInCallStatsTraceLocked() -> (wasRunning: Bool, baseline: CallStatsSnapshot?) {
+    /// Stops the trace and forgets the active streams. Reports whether a trace was running, the
+    /// baseline its final read should use, and the pre-offer snapshot if one was stashed.
+    /// Caller holds `inCallLock`.
+    private func stopInCallStatsTraceLocked() -> (wasRunning: Bool, baseline: CallStatsSnapshot?, preOffer: CallStatsSnapshot?) {
         let wasRunning = inCallStatsTraceTask != nil
         let baseline = tracedInCallStats
+        let preOffer = preOfferInCallStats
         inCallStatsTraceTask?.cancel()
         inCallStatsTraceTask = nil
         tracedInCallStats = nil
+        preOfferInCallStats = nil
         activeCallStreamIds.removeAll()
-        return (wasRunning, baseline)
+        return (wasRunning, baseline, preOffer)
+    }
+
+    /// Reads and stashes a snapshot before a subscribe re-offer is applied, for the final
+    /// in-call log if this re-offer ends the call. No-op when the in-call trace is not running.
+    private func stashInCallStatsBeforeOffer(pcManager: any PeerConnectionManagerProtocol) async {
+        guard let running = runningInCallTrace() else { return }
+        let snapshot = await readCallStats(
+            label: "In-call stats before subscribe offer",
+            pcManager: pcManager,
+            baseline: running.baseline
+        )
+        guard let snapshot else { return }
+        storePreOfferInCallStats(snapshot, forTrace: running.task)
+    }
+
+    private func runningInCallTrace() -> (task: Task<Void, Never>, baseline: CallStatsSnapshot?)? {
+        inCallLock.lock()
+        defer { inCallLock.unlock() }
+        guard let task = inCallStatsTraceTask else { return nil }
+        return (task, tracedInCallStats)
+    }
+
+    private func storePreOfferInCallStats(_ snapshot: CallStatsSnapshot, forTrace task: Task<Void, Never>) {
+        inCallLock.lock()
+        defer { inCallLock.unlock() }
+        // The trace ended or restarted while the read was in flight: the result belongs to an earlier call
+        if inCallStatsTraceTask == task {
+            preOfferInCallStats = snapshot
+        }
     }
 
     /// Same contract as `endCallStatsTrace`, for the in-call trace: logs one last snapshot and
@@ -609,6 +651,19 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// Reads and logs one snapshot. Returns it only when the read completed, so a timed-out read is
     /// reported rather than logged as zeros and never becomes a bitrate baseline.
     private func traceCallStats(
+        label: String,
+        pcManager: (any PeerConnectionManagerProtocol)?,
+        baseline: CallStatsSnapshot?
+    ) async -> CallStatsSnapshot? {
+        guard let snapshot = await readCallStats(label: label, pcManager: pcManager, baseline: baseline) else {
+            return nil
+        }
+        Logger.shared.debug("\(label): \(snapshot)")
+        return snapshot
+    }
+
+    /// Reads one snapshot without logging it. Nil when the read timed out or there is no manager.
+    private func readCallStats(
         label: String,
         pcManager: (any PeerConnectionManagerProtocol)?,
         baseline: CallStatsSnapshot?
@@ -633,7 +688,6 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             Logger.shared.warn("\(label) timed out after \(timeout)s")
             return nil
         }
-        Logger.shared.debug("\(label): \(snapshot)")
         return snapshot
     }
 
@@ -1079,6 +1133,9 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     ) async {
         do {
             Logger.shared.debug("Subscribe SDP offer: revision=\(notification.sdpRevision.map(String.init) ?? "nil"), endpointId=\(notification.endpointId ?? "nil"), metadata keys=\(notification.trackMetadata?.keys.joined(separator: ",") ?? "none")")
+
+            // Before the remote description is applied: a re-offer that ends the call removes its inbound stats
+            await stashInCallStatsBeforeOffer(pcManager: pcManager)
 
             let answerSdp = try await pcManager.handleSubscribeSdpOffer(
                 sdpOffer: notification.sdpOffer,
