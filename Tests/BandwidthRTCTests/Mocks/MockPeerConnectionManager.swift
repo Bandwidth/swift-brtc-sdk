@@ -57,6 +57,10 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
     var resetPeerConnectionsCallCount = 0
     var reattachPublishedStreamsCallCount = 0
     var handleSubscribeSdpOfferCallCount = 0
+    /// getCallStats() calls seen so far each time a subscribe offer was applied; shows whether a read beat it.
+    var handleSubscribeSdpOfferGetCallStatsCallCountArgs: [Int] = []
+    /// Runs while a subscribe offer is being applied, to stand in for what the offer does to the media.
+    var onHandleSubscribeSdpOffer: (() -> Void)?
     var answerInitialOfferCallCount = 0
     var handlePublishSdpOfferCallCount = 0
     var handlePublishSdpOfferRevisionArg: Int? = nil
@@ -150,6 +154,8 @@ final class MockPeerConnectionManager: @unchecked Sendable, PeerConnectionManage
         metadata: [String: TrackMetadata]?
     ) async throws -> String {
         handleSubscribeSdpOfferCallCount += 1
+        handleSubscribeSdpOfferGetCallStatsCallCountArgs.append(getCallStatsCallCount)
+        onHandleSubscribeSdpOffer?()
         if let error = shouldThrowOnHandleSubscribeSdpOffer { throw error }
         return handleSubscribeSdpOfferResult
     }
