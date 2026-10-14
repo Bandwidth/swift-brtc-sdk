@@ -9,6 +9,13 @@ private let sdkVersion = SDKVersion.current
 /// Ping interval in seconds.
 private let pingInterval: TimeInterval = 60
 
+/// How often buffered SDK logs are sent to the gateway while connected, in seconds.
+private let defaultDiagnosticsFlushInterval: TimeInterval = 5 * 60
+
+/// How long disconnect() waits for the final diagnostics batch to be written before closing the
+/// socket anyway, in seconds.
+private let diagnosticsSendTimeout: TimeInterval = 2
+
 /// HTTP statuses on a rejected WebSocket handshake that will keep recurring for as long as the
 /// underlying condition holds (e.g. a stale token, or another device holding the endpoint).
 /// Callers should treat these as non-retryable rather than reconnecting.
@@ -45,6 +52,11 @@ actor SignalingClient {
     private var urlSession: URLSession?
     private var receiveTask: Task<Void, Never>?
     private var pingTask: Task<Void, Never>?
+    private var diagnosticsTask: Task<Void, Never>?
+
+    // SDK logs shipped to the gateway as "deviceDiagnostics"
+    private let diagnostics: DiagnosticsBatcher
+    private let diagnosticsFlushInterval: TimeInterval
 
     // JSON-RPC request/response correlation
     private var pendingRequests: [String: CheckedContinuation<AnyCodable?, Error>] = [:]
@@ -58,16 +70,23 @@ actor SignalingClient {
 
     // MARK: - Init
 
-    init(webSocketFactory: @escaping (URL) -> (any WebSocketProtocol, URLSession?) = { url in
-        let session = URLSession(configuration: .default)
-        return (session.webSocketTask(with: url), session)
-    }) {
+    init(
+        webSocketFactory: @escaping (URL) -> (any WebSocketProtocol, URLSession?) = { url in
+            let session = URLSession(configuration: .default)
+            return (session.webSocketTask(with: url), session)
+        },
+        diagnosticsFlushInterval: TimeInterval = defaultDiagnosticsFlushInterval,
+        diagnostics: DiagnosticsBatcher = DiagnosticsBatcher()
+    ) {
         self.webSocketFactory = webSocketFactory
+        self.diagnosticsFlushInterval = diagnosticsFlushInterval
+        self.diagnostics = diagnostics
     }
 
     deinit {
         receiveTask?.cancel()
         pingTask?.cancel()
+        diagnosticsTask?.cancel()
     }
 
     // MARK: - Connection
@@ -94,6 +113,10 @@ actor SignalingClient {
             throw BandwidthRTCError.connectionFailed("Invalid gateway URL")
         }
 
+        // From here on every SDK log line is buffered, so lines logged while offline still ship
+        // once the socket is back.
+        diagnostics.start()
+
         log.debug("Gateway URL: \(url)")
         log.info("Connecting to \(url.host ?? "unknown")")
 
@@ -114,6 +137,9 @@ actor SignalingClient {
         // Start ping keepalive
         startPingLoop()
 
+        // Start periodic diagnostics flush
+        startDiagnosticsLoop()
+
         log.debug("WebSocket connection initiated")
     }
 
@@ -123,6 +149,13 @@ actor SignalingClient {
         // Send leave notification (fire-and-forget)
         sendNotification(method: "leave", params: EmptyParams())
         log.debug("Leave notification sent")
+
+        // The final batch has to be written before the socket closes
+        diagnosticsTask?.cancel()
+        diagnosticsTask = nil
+        await flushDiagnostics()
+        diagnostics.stop()
+        diagnostics.discard()
 
         teardownTransport()
         isConnected = false
@@ -140,6 +173,8 @@ actor SignalingClient {
         receiveTask = nil
         pingTask?.cancel()
         pingTask = nil
+        diagnosticsTask?.cancel()
+        diagnosticsTask = nil
 
         webSocket?.cancel(with: .normalClosure, reason: nil)
         webSocket = nil
@@ -239,15 +274,27 @@ actor SignalingClient {
         }
     }
 
-    private func sendNotification<P: Encodable>(method: String, params: P) {
-        guard let webSocket, isConnected else { return }
+    /// Sends a notification (no id, no reply). `completion` runs once the write finishes, with the
+    /// error if it failed or the notification could not be sent at all.
+    private func sendNotification<P: Encodable>(
+        method: String,
+        params: P,
+        completion: (@Sendable (Error?) -> Void)? = nil
+    ) {
+        guard let webSocket, isConnected else {
+            completion?(BandwidthRTCError.notConnected)
+            return
+        }
 
         let notification = JsonRpcNotification(method: method, params: params)
         guard let data = try? JSONEncoder().encode(notification),
-              let message = String(data: data, encoding: .utf8) else { return }
+              let message = String(data: data, encoding: .utf8) else {
+            completion?(BandwidthRTCError.rpcError(code: -32700, message: "Failed to encode \(method)"))
+            return
+        }
 
         log.debug("RPC notify: \(method)")
-        webSocket.send(.string(message)) { _ in }
+        webSocket.send(.string(message)) { error in completion?(error) }
     }
 
     private func generateRequestId() -> String {
@@ -404,5 +451,58 @@ actor SignalingClient {
     private func sendPing() {
         sendNotification(method: "ping", params: EmptyParams())
         log.debug("Ping sent")
+    }
+
+    // MARK: - Private: Diagnostics
+
+    private func startDiagnosticsLoop() {
+        let intervalNanoseconds = UInt64(diagnosticsFlushInterval * 1_000_000_000)
+        diagnosticsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalNanoseconds)
+                guard !Task.isCancelled, let self else { break }
+                await self.flushDiagnostics()
+            }
+        }
+    }
+
+    /// Sends the buffered logs as a `deviceDiagnostics` notification and waits for the write. Skips
+    /// an empty batch, and leaves the buffer alone while there is no socket to send it on. A failed
+    /// send is logged and its batch dropped; that log only lands in the buffer for the next flush,
+    /// so a failure can never trigger another send.
+    private func flushDiagnostics() async {
+        guard isConnected, webSocket != nil else { return }
+        let logs = diagnostics.drain()
+        guard !logs.isEmpty else { return }
+
+        let log = self.log
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let once = DiagnosticsSendGate(continuation)
+            sendNotification(method: "deviceDiagnostics", params: DeviceDiagnosticsParams(logs: logs)) { error in
+                if let error {
+                    log.error("Error sending diagnostics: \(error.localizedDescription)")
+                }
+                once.resume()
+            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + diagnosticsSendTimeout) { once.resume() }
+        }
+    }
+}
+
+/// Resumes a continuation at most once, whichever of two racing callers gets there first.
+private final class DiagnosticsSendGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(_ continuation: CheckedContinuation<Void, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume() {
+        lock.lock()
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume()
     }
 }

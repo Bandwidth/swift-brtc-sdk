@@ -16,6 +16,11 @@ final class MockWebSocket: @unchecked Sendable, WebSocketProtocol {
     private(set) var resumeCallCount: Int = 0
     private(set) var cancelCalled: Bool = false
     private(set) var capturedCancelCode: URLSessionWebSocketTask.CloseCode?
+    /// How many messages had been sent when the socket was cancelled; shows what beat the close.
+    private(set) var sentCountAtCancel: Int?
+
+    /// When set, every `send` reports this error to its completion handler.
+    var sendError: Error?
 
     /// Settable so tests can simulate a rejected handshake (e.g. HTTP 403/409).
     var response: URLResponse?
@@ -37,6 +42,7 @@ final class MockWebSocket: @unchecked Sendable, WebSocketProtocol {
         lock.lock()
         cancelCalled = true
         capturedCancelCode = closeCode
+        sentCountAtCancel = sentMessages.count
         let cont = pendingContinuation
         pendingContinuation = nil
         lock.unlock()
@@ -74,8 +80,9 @@ final class MockWebSocket: @unchecked Sendable, WebSocketProtocol {
     func send(_ message: URLSessionWebSocketTask.Message, completionHandler: @escaping (Error?) -> Void) {
         lock.lock()
         sentMessages.append(message)
+        let error = sendError
         lock.unlock()
-        completionHandler(nil)
+        completionHandler(error)
     }
 
     // MARK: - Test helpers
@@ -105,6 +112,16 @@ final class MockWebSocket: @unchecked Sendable, WebSocketProtocol {
         } else {
             lock.unlock()
             cont?.resume(throwing: error)
+        }
+    }
+
+    /// Thread-safe copy of the messages sent so far, as strings.
+    func sentStrings() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return sentMessages.compactMap {
+            if case .string(let s) = $0 { return s }
+            return nil
         }
     }
 

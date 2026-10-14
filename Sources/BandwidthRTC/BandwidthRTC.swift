@@ -222,6 +222,11 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     /// so tests do not have to wait five minutes.
     var callStatsTraceInterval: TimeInterval = 5 * 60
 
+    /// How often the call stats snapshot is written to the debug log while a call stream is
+    /// active. Runs independently of the 5-minute trace, so both may log at the same moment.
+    /// Overridable so tests do not have to wait ten seconds.
+    var inCallStatsTraceInterval: TimeInterval = 10
+
     /// A stats read that has not completed by now is reported and dropped. A peer connection can
     /// be closed with a read in flight, in which case its callback may never fire. Overridable so
     /// tests do not have to wait for it.
@@ -243,6 +248,31 @@ public final class BandwidthRTCClient: @unchecked Sendable {
             callStatsLock.lock()
             defer { callStatsLock.unlock() }
             tracedCallStats = newValue
+        }
+    }
+
+    /// Guards the in-call trace state below: the stream callbacks arrive on the main queue while
+    /// teardown runs wherever the application or the reconnect loop happens to be, and "first
+    /// stream starts the trace, last stream ends it" has to be decided atomically.
+    private let inCallLock = NSLock()
+
+    /// Ids of the subscribe call streams currently available. The in-call trace runs exactly
+    /// while this is non-empty.
+    private var activeCallStreamIds: Set<String> = []
+    private var inCallStatsTraceTask: Task<Void, Never>?
+
+    /// Own baseline, separate from the 5-minute trace's, so each trace's bitrates span its own interval.
+    private var tracedInCallStats: CallStatsSnapshot?
+    private var lastTracedInCallStats: CallStatsSnapshot? {
+        get {
+            inCallLock.lock()
+            defer { inCallLock.unlock() }
+            return tracedInCallStats
+        }
+        set {
+            inCallLock.lock()
+            defer { inCallLock.unlock() }
+            tracedInCallStats = newValue
         }
     }
 
@@ -334,6 +364,8 @@ public final class BandwidthRTCClient: @unchecked Sendable {
 
         // A reconnect is about to close the previous session's peer connections
         await endCallStatsTrace(reason: "reconnect")
+        // The old call streams never fire onStreamUnavailable once their peer connections close
+        await endInCallStatsTrace(reason: "reconnect")
         let pcMgr = try preparePeerConnectionManager()
 
         // Wire up peer connection callbacks
@@ -346,10 +378,12 @@ public final class BandwidthRTCClient: @unchecked Sendable {
                 autoAccepted: trackMetadata?.autoAccepted,
                 tags: trackMetadata?.tags
             )
+            self?.callStreamAvailable(stream.streamId)
             // Always fire raw callback for backward compatibility
             self?.onStreamAvailable?(rtcStream)
         }
         pcMgr.onStreamUnavailable = { [weak self] streamId in
+            self?.callStreamUnavailable(streamId)
             self?.onStreamUnavailable?(streamId)
         }
         pcMgr.onDtmfSent = { [weak self] event in
@@ -444,6 +478,7 @@ public final class BandwidthRTCClient: @unchecked Sendable {
     private func cleanupSession() async {
         // Before the peer connections close: the final read has to see them alive
         await endCallStatsTrace(reason: "session cleanup")
+        await endInCallStatsTrace(reason: "session cleanup")
         isConnected = false
         hasActiveCall = false
         peerConnectionManager?.cleanup()
@@ -492,6 +527,83 @@ public final class BandwidthRTCClient: @unchecked Sendable {
         let pcManager = peerConnectionManager
         stopCallStatsTrace()
         _ = await traceCallStats(label: "Final call stats (\(reason))", pcManager: pcManager, baseline: baseline)
+    }
+
+    // MARK: - Private: In-Call Stats Trace
+
+    /// A subscribe call stream appeared. The first one starts the trace.
+    private func callStreamAvailable(_ streamId: String) {
+        inCallLock.lock()
+        defer { inCallLock.unlock() }
+        let wasIdle = activeCallStreamIds.isEmpty
+        activeCallStreamIds.insert(streamId)
+        if wasIdle {
+            startInCallStatsTraceLocked()
+        }
+    }
+
+    /// A subscribe call stream went away. The last one ends the trace.
+    private func callStreamUnavailable(_ streamId: String) {
+        inCallLock.lock()
+        let isLastStream = activeCallStreamIds.remove(streamId) != nil && activeCallStreamIds.isEmpty
+        let ended = isLastStream ? stopInCallStatsTraceLocked() : (wasRunning: false, baseline: nil)
+        let pcManager = peerConnectionManager
+        inCallLock.unlock()
+        guard ended.wasRunning else { return }
+        // The callback is synchronous, so the final read runs detached
+        Task { [weak self] in
+            _ = await self?.traceCallStats(
+                label: "Final in-call stats (call ended)",
+                pcManager: pcManager,
+                baseline: ended.baseline
+            )
+        }
+    }
+
+    /// Only called on the idle to in-call transition, so no task or baseline is left to reset.
+    /// Caller holds `inCallLock`.
+    private func startInCallStatsTraceLocked() {
+        let intervalNanoseconds = UInt64(inCallStatsTraceInterval * 1_000_000_000)
+        inCallStatsTraceTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: intervalNanoseconds)
+                guard !Task.isCancelled, let self else { return }
+                let snapshot = await self.traceCallStats(
+                    label: "In-call stats",
+                    pcManager: self.peerConnectionManager,
+                    baseline: self.lastTracedInCallStats
+                )
+                // The trace ended while the read was in flight: the result belongs to an earlier call
+                guard !Task.isCancelled else { return }
+                if let snapshot {
+                    self.lastTracedInCallStats = snapshot
+                }
+            }
+        }
+    }
+
+    /// Stops the trace and forgets the active streams. Reports whether a trace was running and
+    /// the baseline its final read should use. Caller holds `inCallLock`.
+    private func stopInCallStatsTraceLocked() -> (wasRunning: Bool, baseline: CallStatsSnapshot?) {
+        let wasRunning = inCallStatsTraceTask != nil
+        let baseline = tracedInCallStats
+        inCallStatsTraceTask?.cancel()
+        inCallStatsTraceTask = nil
+        tracedInCallStats = nil
+        activeCallStreamIds.removeAll()
+        return (wasRunning, baseline)
+    }
+
+    /// Same contract as `endCallStatsTrace`, for the in-call trace: logs one last snapshot and
+    /// stops it, no-op when it is not running. Also forgets the active call streams. Call it
+    /// before the peer connections close.
+    private func endInCallStatsTrace(reason: String) async {
+        inCallLock.lock()
+        let ended = stopInCallStatsTraceLocked()
+        let pcManager = peerConnectionManager
+        inCallLock.unlock()
+        guard ended.wasRunning else { return }
+        _ = await traceCallStats(label: "Final in-call stats (\(reason))", pcManager: pcManager, baseline: ended.baseline)
     }
 
     /// Reads and logs one snapshot. Returns it only when the read completed, so a timed-out read is

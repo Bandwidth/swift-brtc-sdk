@@ -113,6 +113,19 @@ possible:
 
 ---
 
+## Call stats and diagnostics
+
+`getCallStats(previousSnapshot:completion:)` returns a `CallStatsSnapshot` for the current call.
+
+The SDK also writes call stats to the debug log (set `logLevel` to `.debug`):
+
+- **Every 5 minutes** while connected ("Call stats"), and once more when the session ends ("Final call stats").
+- **Every 10 seconds** while a call is active, meaning at least one subscribe stream is available ("In-call stats"), and once more when the call ends ("Final in-call stats"). The two traces run independently and may log at the same moment.
+
+Client logs are also sent to Bandwidth as `deviceDiagnostics` notifications over the signaling connection: every log line at every level, whatever `logLevel` is set to, in a batch every 5 minutes while connected and a final batch on `disconnect()`. Whether Bandwidth keeps them is decided server side for your account. No SDK setting is needed.
+
+---
+
 ## Configuration
 
 ### `BandwidthRTCClient` init
