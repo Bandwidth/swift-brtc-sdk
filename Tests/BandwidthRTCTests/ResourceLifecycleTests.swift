@@ -490,6 +490,14 @@ final class ResourceLifecycleTests: XCTestCase {
         XCTAssertEqual(snapshot.inboundBitrate, 0)
         XCTAssertEqual(snapshot.outboundBitrate, 0)
         XCTAssertEqual(snapshot.timestamp, 0)
+        XCTAssertEqual(snapshot.publishPeer.packetsSent, 0)
+        XCTAssertEqual(snapshot.publishPeer.bytesSent, 0)
+        XCTAssertEqual(snapshot.publishPeer.packetsReceived, 0)
+        XCTAssertEqual(snapshot.publishPeer.bytesReceived, 0)
+        XCTAssertEqual(snapshot.subscribePeer.packetsSent, 0)
+        XCTAssertEqual(snapshot.subscribePeer.bytesSent, 0)
+        XCTAssertEqual(snapshot.subscribePeer.packetsReceived, 0)
+        XCTAssertEqual(snapshot.subscribePeer.bytesReceived, 0)
     }
 
     // MARK: - Log Level Configuration

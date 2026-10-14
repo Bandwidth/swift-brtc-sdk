@@ -451,4 +451,128 @@ final class PeerConnectionManagerTests: XCTestCase {
         XCTAssertEqual(s.remoteJitter, 0.02)
         XCTAssertEqual(s.rtcpRoundTripTime, 0.2)
     }
+
+    // MARK: - Per-Peer Call Stats
+
+    private func rtp(_ type: String, _ kind: String, packetsSent: Int? = nil, bytesSent: Int? = nil,
+                     packetsReceived: Int? = nil, bytesReceived: Int? = nil) -> Stat {
+        var values: [String: Any] = ["kind": kind]
+        if let packetsSent { values["packetsSent"] = NSNumber(value: packetsSent) }
+        if let bytesSent { values["bytesSent"] = NSNumber(value: bytesSent) }
+        if let packetsReceived { values["packetsReceived"] = NSNumber(value: packetsReceived) }
+        if let bytesReceived { values["bytesReceived"] = NSNumber(value: bytesReceived) }
+        return (type: type, values: values)
+    }
+
+    func testPerPeerStatsSeparateEachPeerAndBothDirections() {
+        var s = CallStatsSnapshot()
+        PeerConnectionManager.applyPublishStats([
+            rtp("outbound-rtp", "audio", packetsSent: 10, bytesSent: 1000),
+            rtp("inbound-rtp", "audio", packetsReceived: 1, bytesReceived: 10)
+        ], to: &s)
+        PeerConnectionManager.applySubscribeStats([
+            rtp("inbound-rtp", "audio", packetsReceived: 20, bytesReceived: 2000),
+            rtp("outbound-rtp", "audio", packetsSent: 2, bytesSent: 20)
+        ], codecMimeType: { _ in nil }, statValues: { _ in nil }, to: &s)
+
+        XCTAssertEqual(s.publishPeer.packetsSent, 10)
+        XCTAssertEqual(s.publishPeer.bytesSent, 1000)
+        XCTAssertEqual(s.publishPeer.packetsReceived, 1)
+        XCTAssertEqual(s.publishPeer.bytesReceived, 10)
+        XCTAssertEqual(s.subscribePeer.packetsReceived, 20)
+        XCTAssertEqual(s.subscribePeer.bytesReceived, 2000)
+        XCTAssertEqual(s.subscribePeer.packetsSent, 2)
+        XCTAssertEqual(s.subscribePeer.bytesSent, 20)
+    }
+
+    func testPerPeerStatsSumAcrossAudioStreams() {
+        var s = CallStatsSnapshot()
+        PeerConnectionManager.applyPublishStats([
+            rtp("outbound-rtp", "audio", packetsSent: 10, bytesSent: 1000),
+            rtp("outbound-rtp", "audio", packetsSent: 5, bytesSent: 500)
+        ], to: &s)
+        PeerConnectionManager.applySubscribeStats([
+            rtp("inbound-rtp", "audio", packetsReceived: 7, bytesReceived: 700),
+            rtp("inbound-rtp", "audio", packetsReceived: 3, bytesReceived: 300)
+        ], codecMimeType: { _ in nil }, statValues: { _ in nil }, to: &s)
+
+        XCTAssertEqual(s.publishPeer.packetsSent, 15)
+        XCTAssertEqual(s.publishPeer.bytesSent, 1500)
+        XCTAssertEqual(s.subscribePeer.packetsReceived, 10)
+        XCTAssertEqual(s.subscribePeer.bytesReceived, 1000)
+    }
+
+    func testPerPeerStatsIgnoreNonAudioRtp() {
+        var s = CallStatsSnapshot()
+        PeerConnectionManager.applyPublishStats([
+            rtp("outbound-rtp", "video", packetsSent: 10, bytesSent: 1000),
+            rtp("inbound-rtp", "video", packetsReceived: 10, bytesReceived: 1000)
+        ], to: &s)
+        PeerConnectionManager.applySubscribeStats([
+            rtp("inbound-rtp", "video", packetsReceived: 10, bytesReceived: 1000),
+            rtp("outbound-rtp", "video", packetsSent: 10, bytesSent: 1000)
+        ], codecMimeType: { _ in nil }, statValues: { _ in nil }, to: &s)
+
+        XCTAssertEqual(s.publishPeer.packetsSent, 0)
+        XCTAssertEqual(s.publishPeer.bytesSent, 0)
+        XCTAssertEqual(s.publishPeer.packetsReceived, 0)
+        XCTAssertEqual(s.publishPeer.bytesReceived, 0)
+        XCTAssertEqual(s.subscribePeer.packetsSent, 0)
+        XCTAssertEqual(s.subscribePeer.bytesSent, 0)
+        XCTAssertEqual(s.subscribePeer.packetsReceived, 0)
+        XCTAssertEqual(s.subscribePeer.bytesReceived, 0)
+    }
+
+    func testPerPeerStatsMissingPeerStaysZero() {
+        // Only the publish report is applied, as when the subscribe PC does not exist.
+        var s = CallStatsSnapshot()
+        PeerConnectionManager.applyPublishStats([
+            rtp("outbound-rtp", "audio", packetsSent: 10, bytesSent: 1000)
+        ], to: &s)
+        XCTAssertEqual(s.publishPeer.packetsSent, 10)
+        XCTAssertEqual(s.subscribePeer.packetsSent, 0)
+        XCTAssertEqual(s.subscribePeer.bytesSent, 0)
+        XCTAssertEqual(s.subscribePeer.packetsReceived, 0)
+        XCTAssertEqual(s.subscribePeer.bytesReceived, 0)
+
+        // Only the subscribe report is applied, as when the publish PC does not exist.
+        var t = CallStatsSnapshot()
+        PeerConnectionManager.applySubscribeStats([
+            rtp("inbound-rtp", "audio", packetsReceived: 20, bytesReceived: 2000)
+        ], codecMimeType: { _ in nil }, statValues: { _ in nil }, to: &t)
+        XCTAssertEqual(t.subscribePeer.packetsReceived, 20)
+        XCTAssertEqual(t.publishPeer.packetsSent, 0)
+        XCTAssertEqual(t.publishPeer.bytesSent, 0)
+        XCTAssertEqual(t.publishPeer.packetsReceived, 0)
+        XCTAssertEqual(t.publishPeer.bytesReceived, 0)
+    }
+
+    func testPerPeerStatsDoNotChangeFlatFields() {
+        var s = CallStatsSnapshot()
+        PeerConnectionManager.applyPublishStats([
+            rtp("outbound-rtp", "audio", packetsSent: 10, bytesSent: 1000),
+            rtp("inbound-rtp", "audio", packetsReceived: 1, bytesReceived: 10)
+        ], to: &s)
+        PeerConnectionManager.applySubscribeStats([
+            rtp("inbound-rtp", "audio", packetsReceived: 20, bytesReceived: 2000),
+            rtp("outbound-rtp", "audio", packetsSent: 2, bytesSent: 20)
+        ], codecMimeType: { _ in nil }, statValues: { _ in nil }, to: &s)
+
+        // Flat sent fields stay publish-only; flat received fields stay subscribe-only.
+        XCTAssertEqual(s.packetsSent, 10)
+        XCTAssertEqual(s.bytesSent, 1000)
+        XCTAssertEqual(s.packetsReceived, 20)
+        XCTAssertEqual(s.bytesReceived, 2000)
+    }
+
+    func testSnapshotDescriptionIncludesPerPeerFields() {
+        var s = CallStatsSnapshot()
+        s.publishPeer.bytesSent = 4321
+        s.subscribePeer.bytesReceived = 8765
+        let description = "\(s)"
+        XCTAssertTrue(description.contains("publishPeer"))
+        XCTAssertTrue(description.contains("subscribePeer"))
+        XCTAssertTrue(description.contains("4321"))
+        XCTAssertTrue(description.contains("8765"))
+    }
 }

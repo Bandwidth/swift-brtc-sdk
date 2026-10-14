@@ -117,6 +117,13 @@ possible:
 
 `getCallStats(previousSnapshot:completion:)` returns a `CallStatsSnapshot` for the current call.
 
+The snapshot also carries per-peer counters, each read from that peer connection's own stats report (audio RTP only), so stats can be attributed to the peer they came from:
+
+- `publishPeer` - the peer connection that sends local media.
+- `subscribePeer` - the peer connection that receives remote media.
+
+Each is a `PeerCallStats` with `packetsSent`, `bytesSent`, `packetsReceived` and `bytesReceived`. Normally only the sent fields of `publishPeer` and the received fields of `subscribePeer` are non-zero. All counters are 0 for a peer connection that has no stats yet. The existing flat fields (`packetsSent`, `bytesReceived`, and so on) are unchanged.
+
 The SDK also writes call stats to the debug log (set `logLevel` to `.debug`):
 
 - **Every 5 minutes** while connected ("Call stats"), and once more when the session ends ("Final call stats").
