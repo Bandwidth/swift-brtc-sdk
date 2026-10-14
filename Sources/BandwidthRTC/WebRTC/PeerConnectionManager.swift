@@ -638,7 +638,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         }
     }
 
-    /// Parse subscribe-PC stats (inbound-rtp, transport, candidate-pair, codec) into the snapshot.
+    /// Parse subscribe-PC stats (inbound-rtp, outbound-rtp, transport, candidate-pair, codec) into the snapshot.
     static func applySubscribeStats(
         _ stats: [(type: String, values: [String: Any])],
         codecMimeType: (String) -> String?,
@@ -653,14 +653,25 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
             // With several audio streams (e.g. a conference), counters are summed and quality fields keep the highest value.
             if stat.type == "inbound-rtp",
                let kind = stat.values["kind"] as? String, kind == "audio" {
-                snapshot.packetsReceived += (stat.values["packetsReceived"] as? NSNumber)?.intValue ?? 0
+                let packetsReceived = (stat.values["packetsReceived"] as? NSNumber)?.intValue ?? 0
+                let bytesReceived = (stat.values["bytesReceived"] as? NSNumber)?.intValue ?? 0
+                snapshot.packetsReceived += packetsReceived
                 snapshot.packetsLost += (stat.values["packetsLost"] as? NSNumber)?.intValue ?? 0
-                snapshot.bytesReceived += (stat.values["bytesReceived"] as? NSNumber)?.intValue ?? 0
+                snapshot.bytesReceived += bytesReceived
+                snapshot.subscribePeer.packetsReceived += packetsReceived
+                snapshot.subscribePeer.bytesReceived += bytesReceived
                 snapshot.jitter = max(snapshot.jitter, (stat.values["jitter"] as? NSNumber)?.doubleValue ?? 0)
                 snapshot.audioLevel = max(snapshot.audioLevel, (stat.values["audioLevel"] as? NSNumber)?.doubleValue ?? 0)
                 if codecId == nil {
                     codecId = stat.values["codecId"] as? String
                 }
+            }
+
+            // Normally 0 on a receive-only peer; the flat sent fields stay publish-only.
+            if stat.type == "outbound-rtp",
+               let kind = stat.values["kind"] as? String, kind == "audio" {
+                snapshot.subscribePeer.packetsSent += (stat.values["packetsSent"] as? NSNumber)?.intValue ?? 0
+                snapshot.subscribePeer.bytesSent += (stat.values["bytesSent"] as? NSNumber)?.intValue ?? 0
             }
 
             if stat.type == "transport",
@@ -685,7 +696,7 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         }
     }
 
-    /// Parse publish-PC stats (outbound-rtp, remote-inbound-rtp) into the snapshot.
+    /// Parse publish-PC stats (outbound-rtp, inbound-rtp, remote-inbound-rtp) into the snapshot.
     static func applyPublishStats(
         _ stats: [(type: String, values: [String: Any])],
         to snapshot: inout CallStatsSnapshot
@@ -693,8 +704,19 @@ final class PeerConnectionManager: NSObject, @unchecked Sendable {
         for stat in stats {
             if stat.type == "outbound-rtp",
                let kind = stat.values["kind"] as? String, kind == "audio" {
-                snapshot.packetsSent += (stat.values["packetsSent"] as? NSNumber)?.intValue ?? 0
-                snapshot.bytesSent += (stat.values["bytesSent"] as? NSNumber)?.intValue ?? 0
+                let packetsSent = (stat.values["packetsSent"] as? NSNumber)?.intValue ?? 0
+                let bytesSent = (stat.values["bytesSent"] as? NSNumber)?.intValue ?? 0
+                snapshot.packetsSent += packetsSent
+                snapshot.bytesSent += bytesSent
+                snapshot.publishPeer.packetsSent += packetsSent
+                snapshot.publishPeer.bytesSent += bytesSent
+            }
+
+            // Normally 0 on a send-only peer; the flat received fields stay subscribe-only.
+            if stat.type == "inbound-rtp",
+               let kind = stat.values["kind"] as? String, kind == "audio" {
+                snapshot.publishPeer.packetsReceived += (stat.values["packetsReceived"] as? NSNumber)?.intValue ?? 0
+                snapshot.publishPeer.bytesReceived += (stat.values["bytesReceived"] as? NSNumber)?.intValue ?? 0
             }
 
             if stat.type == "remote-inbound-rtp",
