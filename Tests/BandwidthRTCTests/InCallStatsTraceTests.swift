@@ -22,6 +22,12 @@ private final class LogCapture: @unchecked Sendable {
         }
     }
 
+    func messages(prefix: String) -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages.filter { $0.hasPrefix(prefix) }
+    }
+
     func count(prefix: String) -> Int {
         lock.lock()
         defer { lock.unlock() }
@@ -71,6 +77,11 @@ final class InCallStatsTraceTests: XCTestCase {
 
     private func startStream(_ id: String, on pcManager: MockPeerConnectionManager) {
         pcManager.onStreamAvailable?(factory.mediaStream(withStreamId: id), [.audio], nil)
+    }
+
+    private func sendSubscribeOffer(on sig: MockSignalingClient, revision: Int) {
+        let json = "{\"sdpOffer\":\"v=0...\",\"peerType\":\"subscribe\",\"sdpRevision\":\(revision)}"
+        sig.triggerEvent("sdpOffer", data: Data(json.utf8))
     }
 
     func testDoesNotTraceBeforeACallStream() async throws {
@@ -265,5 +276,102 @@ final class InCallStatsTraceTests: XCTestCase {
         XCTAssertEqual(capture.count(prefix: "In-call stats:"), 0)
         XCTAssertEqual(capture.count(prefix: "Final call stats"), 0)
         await sut.disconnect()
+    }
+
+    // MARK: - Final snapshot taken before the ending re-offer
+
+    func testFinalSnapshotCarriesTheCountersReadBeforeTheEndingReOffer() async throws {
+        let sig = MockSignalingClient()
+        let pcManager = MockPeerConnectionManager()
+        pcManager.getCallStatsResult.bytesReceived = 4242
+        let sut = makeSUT(sig: sig, pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        startStream("call-1", on: pcManager)
+        // The re-offer removes the track: its stats are gone by the time the stream is unavailable
+        pcManager.onHandleSubscribeSdpOffer = {
+            pcManager.getCallStatsResult = CallStatsSnapshot()
+            pcManager.onStreamUnavailable?("call-1")
+        }
+
+        sendSubscribeOffer(on: sig, revision: 1)
+        await wait { self.capture.count(prefix: "Final in-call stats (call ended):") >= 1 }
+
+        let finals = capture.messages(prefix: "Final in-call stats (call ended):")
+        XCTAssertEqual(finals.count, 1)
+        XCTAssertTrue(finals[0].contains("bytesReceived: 4242"), finals[0])
+        // The one read happened before the offer was applied, and the call end did not read again
+        XCTAssertEqual(pcManager.handleSubscribeSdpOfferGetCallStatsCallCountArgs, [1])
+        XCTAssertEqual(pcManager.getCallStatsCallCount, 1)
+        await sut.disconnect()
+    }
+
+    func testReadsNothingBeforeASubscribeOfferWhenNoCallStreamIsActive() async throws {
+        let sig = MockSignalingClient()
+        let pcManager = MockPeerConnectionManager()
+        let sut = makeSUT(sig: sig, pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+
+        sendSubscribeOffer(on: sig, revision: 1)
+        await wait { pcManager.handleSubscribeSdpOfferCallCount >= 1 }
+
+        XCTAssertEqual(pcManager.handleSubscribeSdpOfferCallCount, 1)
+        XCTAssertEqual(pcManager.getCallStatsCallCount, 0)
+
+        // Nothing was stashed, so the call end falls back to a fresh read
+        pcManager.getCallStatsResult.bytesReceived = 7
+        startStream("call-1", on: pcManager)
+        pcManager.onStreamUnavailable?("call-1")
+        await wait { self.capture.count(prefix: "Final in-call stats (call ended):") >= 1 }
+
+        let finals = capture.messages(prefix: "Final in-call stats (call ended):")
+        XCTAssertEqual(finals.count, 1)
+        XCTAssertTrue(finals[0].contains("bytesReceived: 7"), finals[0])
+        XCTAssertEqual(pcManager.getCallStatsCallCount, 1)
+        await sut.disconnect()
+    }
+
+    func testTheStashedSnapshotIsNotReusedByTheNextCall() async throws {
+        let sig = MockSignalingClient()
+        let pcManager = MockPeerConnectionManager()
+        pcManager.getCallStatsResult.bytesReceived = 4242
+        let sut = makeSUT(sig: sig, pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        startStream("call-1", on: pcManager)
+        pcManager.onHandleSubscribeSdpOffer = { pcManager.onStreamUnavailable?("call-1") }
+        sendSubscribeOffer(on: sig, revision: 1)
+        await wait { self.capture.count(prefix: "Final in-call stats (call ended):") >= 1 }
+        pcManager.onHandleSubscribeSdpOffer = nil
+
+        // The second call ends without a re-offer, so no snapshot was stashed for it
+        pcManager.getCallStatsResult.bytesReceived = 99
+        startStream("call-2", on: pcManager)
+        pcManager.onStreamUnavailable?("call-2")
+        await wait { self.capture.count(prefix: "Final in-call stats (call ended):") >= 2 }
+
+        let finals = capture.messages(prefix: "Final in-call stats (call ended):")
+        XCTAssertEqual(finals.count, 2)
+        XCTAssertTrue(finals[0].contains("bytesReceived: 4242"), finals[0])
+        XCTAssertTrue(finals[1].contains("bytesReceived: 99"), finals[1])
+        await sut.disconnect()
+    }
+
+    func testTeardownStillReadsAFreshSnapshotAfterAnOfferThatDidNotEndTheCall() async throws {
+        let sig = MockSignalingClient()
+        let pcManager = MockPeerConnectionManager()
+        pcManager.getCallStatsResult.bytesReceived = 4242
+        let sut = makeSUT(sig: sig, pcManager: pcManager)
+        try await sut.connect(authParams: validAuthParams)
+        startStream("call-1", on: pcManager)
+        sendSubscribeOffer(on: sig, revision: 1)
+        await wait { pcManager.getCallStatsCallCount >= 1 }
+
+        pcManager.getCallStatsResult.bytesReceived = 99
+        await sut.disconnect()
+
+        let finals = capture.messages(prefix: "Final in-call stats (session cleanup):")
+        XCTAssertEqual(finals.count, 1)
+        XCTAssertTrue(finals[0].contains("bytesReceived: 99"), finals[0])
+        // Still before the media was released
+        XCTAssertEqual(pcManager.getCallStatsCleanupCallCountArgs.last, 0)
     }
 }
